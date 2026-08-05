@@ -1,0 +1,34 @@
+# Python / Backend
+.venv/
+*.pyc
+__pycache__/
+*.egg-info/
+dist/
+build/
+
+# Node.js / Frontend
+frontend/node_modules/
+.next/
+out/
+
+# Environment variables (keep secrets safe)
+.env
+.env.local
+.env.*.local
+
+# IDE settings
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# Database files (if any are created locally)
+data/*.db
+
+# Logs
+*.log
+logs/
