@@ -1,34 +1,15 @@
 services:
-  backend:
-    build: ./backend
-    container_name: health-tracker-backend
+  app:
+    build: .
+    container_name: health-connect
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      - "8080:80"
     volumes:
-      - data:/app/data
+      - ./data:/app/data
     environment:
       ADMIN_USER: ${ADMIN_USER:-admin}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-changeme}
-      DATABASE_URL: sqlite:///./data/health_tracker.db
+      DATABASE_URL: sqlite+aiosqlite:///./data/health_tracker.db
       FERNET_KEY: ${FERNET_KEY:-$(openssl rand -hex 32)}
-    networks:
-      - health-network
 
-  frontend:
-    build: ./frontend
-    container_name: health-tracker-frontend
-    restart: unless-stopped
-    ports:
-      - "80:80"
-    depends_on:
-      - backend
-    networks:
-      - health-network
-
-volumes:
-  data:
-
-networks:
-  health-network:
-    driver: bridge

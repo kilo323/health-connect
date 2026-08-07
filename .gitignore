@@ -7,7 +7,7 @@ dist/
 build/
 
 # Node.js / Frontend
-frontend/node_modules/
+app/frontend/node_modules/
 .next/
 out/
 
@@ -27,7 +27,7 @@ out/
 Thumbs.db
 
 # Database files (if any are created locally)
-data/*.db
+data/
 
 # Logs
 *.log
