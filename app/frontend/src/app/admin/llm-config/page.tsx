@@ -1,8 +1,8 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import AuthLayout from '@/components/AuthLayout';
-import { Bot, Save, Loader2, CheckCircle, AlertCircle } from 'lucide-react';
+import { Bot, Save, Loader2, CheckCircle, AlertCircle, RefreshCw } from 'lucide-react';
 import apiClient from '@/lib/api-client';
 
 interface LLMConfig {
@@ -20,6 +20,10 @@ export default function AdminLLMConfigPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [availableModels, setAvailableModels] = useState<string[]>([]);
+  const [fetchingModels, setFetchingModels] = useState(false);
+  const [modelsError, setModelsError] = useState<string | null>(null);
+  const [customModelInput, setCustomModelInput] = useState('');
 
   useEffect(() => {
     loadConfig();
@@ -35,6 +39,39 @@ export default function AdminLLMConfigPage() {
       setLoading(false);
     }
   };
+
+  const fetchModels = useCallback(async () => {
+    if (!config.base_url || !config.api_key) {
+      setModelsError('Please enter API Base URL and API Key first');
+      return;
+    }
+    
+    setFetchingModels(true);
+    setModelsError(null);
+    
+    try {
+      const res = await apiClient.get('/admin/llm/models', {
+        params: {
+          base_url: config.base_url,
+          api_key: config.api_key
+        }
+      });
+      
+      if (res.data.error) {
+        setModelsError(res.data.error);
+        setAvailableModels([]);
+      } else {
+        setAvailableModels(res.data.models);
+        setModelsError(null);
+      }
+    } catch (error) {
+      console.error('Failed to fetch models:', error);
+      setModelsError('Failed to fetch models from endpoint');
+      setAvailableModels([]);
+    } finally {
+      setFetchingModels(false);
+    }
+  }, [config.base_url, config.api_key]);
 
   const handleSave = async () => {
     if (!config.base_url || !config.api_key) return;
@@ -102,16 +139,68 @@ export default function AdminLLMConfigPage() {
 
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Model Name</label>
-            <select
-              value={config.model}
-              onChange={(e) => setConfig({ ...config, model: e.target.value })}
-              className="input-field"
-            >
-              <option value="gpt-4">GPT-4</option>
-              <option value="gpt-4-turbo">GPT-4 Turbo</option>
-              <option value="gpt-3.5-turbo">GPT-3.5 Turbo</option>
-              <option value="gpt-4o">GPT-4o</option>
-            </select>
+            <div className="flex gap-2">
+              <select
+                value={config.model}
+                onChange={(e) => setConfig({ ...config, model: e.target.value })}
+                className="input-field flex-1"
+                disabled={availableModels.length === 0 && !customModelInput}
+              >
+                {availableModels.length > 0 ? (
+                  availableModels.map((model) => (
+                    <option key={model} value={model}>{model}</option>
+                  ))
+                ) : (
+                  <option value="gpt-4">GPT-4 (default)</option>
+                )}
+              </select>
+              <button
+                type="button"
+                onClick={fetchModels}
+                disabled={fetchingModels || !config.base_url || !config.api_key}
+                className="btn-secondary flex items-center gap-2 px-4 py-2"
+                title="Fetch available models from endpoint"
+              >
+                {fetchingModels ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <RefreshCw className="h-4 w-4" />
+                )}
+                Refresh
+              </button>
+            </div>
+            
+            {modelsError && (
+              <p className="text-xs text-red-500 mt-1">{modelsError}</p>
+            )}
+            
+            {availableModels.length > 0 && (
+              <p className="text-xs text-green-600 mt-1">
+                Found {availableModels.length} model(s) from endpoint
+              </p>
+            )}
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Custom Model Name
+            </label>
+            <input
+              type="text"
+              value={customModelInput}
+              onChange={(e) => {
+                setCustomModelInput(e.target.value);
+                if (e.target.value) {
+                  setConfig({ ...config, model: e.target.value });
+                }
+              }}
+              placeholder="Enter custom model name (optional)"
+              className="input-field font-mono text-sm"
+            />
+            <p className="text-xs text-gray-500 mt-1">
+              Use this for providers that don't support /v1/models. 
+              Enter a custom model name to override the dropdown selection.
+            </p>
           </div>
 
           <button

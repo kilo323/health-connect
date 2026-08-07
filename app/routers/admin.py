@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 from pydantic import BaseModel
 import logging
 
@@ -10,6 +11,7 @@ from ..database import get_db
 from ..models.settings import AppSettings, ScheduleConfig
 from ..schemas.auth import Token, UserResponse
 from ..routers.users import get_current_user
+import httpx
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
 logger = logging.getLogger(__name__)
@@ -22,10 +24,10 @@ class LLMConfig(BaseModel):
     model: str = "gpt-4"
 
 
-class ScheduleSettings(BaseModel):
-    """Schedule configuration settings."""
-    is_enabled: bool
-    cron_expression: str = "0 2 * * *"
+class FetchModelsRequest(BaseModel):
+    """Request to fetch available models from an endpoint."""
+    base_url: str
+    api_key: str
 
 
 @router.get("/settings/llm")
@@ -38,7 +40,7 @@ async def get_llm_config(
         raise HTTPException(status_code=403, detail="Admin access required")
     
     result = await db.execute(
-        AppSettings.__table__.select().where(AppSettings.key == "llm_config")
+        select(AppSettings).where(AppSettings.key == "llm_config")
     )
     config = result.scalar_one_or_none()
     
@@ -66,7 +68,7 @@ async def update_llm_config(
     
     # Check if config exists
     result = await db.execute(
-        AppSettings.__table__.select().where(AppSettings.key == "llm_config")
+        select(AppSettings).where(AppSettings.key == "llm_config")
     )
     existing = result.scalar_one_or_none()
     
@@ -98,7 +100,7 @@ async def get_schedule_settings(
         raise HTTPException(status_code=403, detail="Admin access required")
     
     result = await db.execute(
-        ScheduleConfig.__table__.select().first()
+        select(ScheduleConfig).limit(1)
     )
     config = result.scalar_one_or_none()
     
@@ -123,7 +125,7 @@ async def update_schedule_settings(
     
     # Check if config exists
     result = await db.execute(
-        ScheduleConfig.__table__.select().first()
+        select(ScheduleConfig).limit(1)
     )
     existing = result.scalar_one_or_none()
     
@@ -166,3 +168,41 @@ async def get_scheduler_status(
         "is_running": scheduler.is_running(),
         "next_run": None  # Could be implemented to show next scheduled run time
     }
+
+
+@router.get("/llm/models")
+async def fetch_llm_models(
+    base_url: str,
+    api_key: str,
+    current_user: UserResponse = Depends(get_current_user),
+):
+    """Fetch available models from an OpenAI-compatible endpoint."""
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    try:
+        # Normalize the base URL
+        clean_url = base_url.rstrip("/")
+        if not clean_url.endswith("/v1"):
+            clean_url = f"{clean_url}/v1"
+        
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(
+                f"{clean_url}/models",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json"
+                }
+            )
+        
+        if response.status_code == 200:
+            data = response.json()
+            # Standard OpenAI format has "data" array with "id" field
+            models = [m.get("id", "") for m in data.get("data", [])]
+            return {"models": models, "error": None}
+        else:
+            return {"models": [], "error": f"Endpoint returned status {response.status_code}: {response.text[:200]}"}
+    except httpx.TimeoutException:
+        return {"models": [], "error": "Request timed out. Please check the endpoint URL."}
+    except Exception as e:
+        return {"models": [], "error": f"Failed to fetch models: {str(e)}"}

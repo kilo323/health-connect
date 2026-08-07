@@ -1,8 +1,8 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import AuthLayout from '@/components/AuthLayout';
-import { Settings, Link as LinkIcon, Cloud, Bot, Database, CheckCircle, Loader2, AlertCircle } from 'lucide-react';
+import { Settings, Link as LinkIcon, Cloud, Bot, Database, CheckCircle, Loader2, AlertCircle, RefreshCw } from 'lucide-react';
 import apiClient from '@/lib/api-client';
 
 export default function SettingsPage() {
@@ -20,10 +20,15 @@ export default function SettingsPage() {
   const [nextcloudLoading, setNextcloudLoading] = useState(false);
 
   // LLM Config state (admin only)
-  const [llmBaseUrl, setLlmBaseUrl] = useState('https://api.openai.com/v1');
+  const [llmBaseUrl, setLlmBaseUrl] = useState('');
   const [llmApiKey, setLlmApiKey] = useState('');
-  const [llmModel, setLlmModel] = useState('gpt-4');
+  const [llmModel, setLlmModel] = useState('');
   const [llmLoading, setLlmLoading] = useState(false);
+  const [availableModels, setAvailableModels] = useState<string[]>([]);
+  const [fetchingModels, setFetchingModels] = useState(false);
+  const [modelsError, setModelsError] = useState<string | null>(null);
+  const [customModelInput, setCustomModelInput] = useState('');
+  const [configLoaded, setConfigLoaded] = useState(false);
 
   // Load current settings on mount
   useEffect(() => {
@@ -48,13 +53,88 @@ export default function SettingsPage() {
       // Load LLM config if admin
       try {
         const llmRes = await apiClient.get('/admin/settings/llm');
-        setLlmBaseUrl(llmRes.data.base_url);
-        setLlmModel(llmRes.data.model);
+        const baseUrl = llmRes.data?.base_url || '';
+        const apiKey = llmRes.data?.api_key || '';
+        const savedModel = llmRes.data?.model || '';
+
+        if (baseUrl) setLlmBaseUrl(baseUrl);
+        if (apiKey) setLlmApiKey(apiKey);
+        setConfigLoaded(true);
+
+        // Auto-fetch models if we have a configured endpoint
+        if (baseUrl && apiKey) {
+          setFetchingModels(true);
+          try {
+            const modelsRes = await apiClient.get('/admin/llm/models', {
+              params: { base_url: baseUrl, api_key: apiKey }
+            });
+            const models: string[] = modelsRes.data?.models || [];
+            setAvailableModels(models);
+
+            if (modelsRes.data?.error) {
+              setModelsError(modelsRes.data.error);
+            }
+
+            // Select saved model if it's in the list, otherwise put in custom field
+            if (savedModel && models.includes(savedModel)) {
+              setLlmModel(savedModel);
+              setCustomModelInput('');
+            } else if (savedModel) {
+              setLlmModel('');
+              setCustomModelInput(savedModel);
+            }
+          } catch {
+            setModelsError('Failed to fetch models from endpoint');
+          } finally {
+            setFetchingModels(false);
+          }
+        }
       } catch { /* not admin */ }
     } catch (error) {
       console.error('Failed to load settings:', error);
     }
   };
+
+  const fetchModels = useCallback(async () => {
+    if (!llmBaseUrl || !llmApiKey) {
+      setModelsError('Please enter API Base URL and API Key first');
+      return;
+    }
+
+    setFetchingModels(true);
+    setModelsError(null);
+
+    try {
+      const res = await apiClient.get('/admin/llm/models', {
+        params: { base_url: llmBaseUrl, api_key: llmApiKey }
+      });
+
+      if (res.data.error) {
+        setModelsError(res.data.error);
+        setAvailableModels([]);
+      } else {
+        const models = res.data.models || [];
+        setAvailableModels(models);
+        setModelsError(null);
+
+        // Re-select saved model if available, otherwise use custom input
+        if (llmModel && models.includes(llmModel)) {
+          setCustomModelInput('');
+        } else if (customModelInput && models.includes(customModelInput)) {
+          setLlmModel(customModelInput);
+          setCustomModelInput('');
+        } else {
+          setLlmModel('');
+        }
+      }
+    } catch (error) {
+      console.error('Failed to fetch models:', error);
+      setModelsError('Failed to fetch models from endpoint');
+      setAvailableModels([]);
+    } finally {
+      setFetchingModels(false);
+    }
+  }, [llmBaseUrl, llmApiKey, llmModel, customModelInput]);
 
   const handleGoogleConnect = async () => {
     setGoogleLoading(true);
@@ -290,21 +370,78 @@ export default function SettingsPage() {
 
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Model</label>
-              <select
-                value={llmModel}
-                onChange={(e) => setLlmModel(e.target.value)}
-                className="input-field"
-              >
-                <option value="gpt-4">GPT-4</option>
-                <option value="gpt-4-turbo">GPT-4 Turbo</option>
-                <option value="gpt-3.5-turbo">GPT-3.5 Turbo</option>
-                <option value="gpt-4o">GPT-4o</option>
-              </select>
+              <div className="flex gap-2">
+                <select
+                  value={customModelInput ? '' : llmModel}
+                  onChange={(e) => { setLlmModel(e.target.value); setCustomModelInput(''); }}
+                  className="input-field flex-1"
+                  disabled={availableModels.length === 0 && !fetchingModels}
+                >
+                  {availableModels.length > 0 ? (
+                    <>
+                      {!llmModel && !customModelInput && <option value="">-- Select a model --</option>}
+                      {availableModels.map((model) => (
+                        <option key={model} value={model}>{model}</option>
+                      ))}
+                    </>
+                  ) : (
+                    <option value="">No models available — enter custom name below</option>
+                  )}
+                </select>
+                <button
+                  type="button"
+                  onClick={fetchModels}
+                  disabled={fetchingModels || !llmBaseUrl || !llmApiKey}
+                  className="btn-secondary flex items-center gap-2 px-4 py-2"
+                  title="Fetch available models from endpoint"
+                >
+                  {fetchingModels ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <RefreshCw className="h-4 w-4" />
+                  )}
+                  Refresh
+                </button>
+              </div>
+
+              {modelsError && (
+                <p className="text-xs text-red-500 mt-1">{modelsError}</p>
+              )}
+
+              {availableModels.length > 0 && (
+                <p className="text-xs text-green-600 mt-1">
+                  Found {availableModels.length} model(s) from endpoint
+                </p>
+              )}
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Custom Model Name
+              </label>
+              <input
+                type="text"
+                value={customModelInput}
+                onChange={(e) => {
+                  setCustomModelInput(e.target.value);
+                  if (e.target.value) {
+                    setLlmModel(e.target.value);
+                  } else {
+                    // Cleared custom input — reset to first available model if any
+                    setLlmModel(availableModels.length > 0 ? availableModels[0] : '');
+                  }
+                }}
+                placeholder="Enter custom model name (optional)"
+                className="input-field font-mono text-sm"
+              />
+              <p className="text-xs text-gray-500 mt-1">
+                Use this to enter a model name not in the list
+              </p>
             </div>
 
             <button
               type="submit"
-              disabled={llmLoading || !llmBaseUrl || !llmApiKey}
+              disabled={llmLoading || !llmBaseUrl || !llmApiKey || !llmModel}
               className="btn-primary flex items-center gap-2"
             >
               {llmLoading && <Loader2 className="h-4 w-4 animate-spin" />}

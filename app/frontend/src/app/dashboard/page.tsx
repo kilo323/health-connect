@@ -25,15 +25,22 @@ export default function DashboardPage() {
 
   const loadStats = async () => {
     try {
-      // Load stats from API (you'll need to implement these endpoints)
-      const metricsRes = await apiClient.get('/metrics');
-      const documentsRes = await apiClient.get('/documents?status=pending');
-      const analysisRes = await apiClient.get('/pending-analysis');
+      const [documentsRes, analysisRes] = await Promise.allSettled([
+        apiClient.get('/health/documents'),
+        apiClient.get('/health/metrics/weight'),
+      ]);
+
+      const pendingDocs = documentsRes.status === 'fulfilled'
+        ? (documentsRes.value.data as any[])?.filter((d: any) => d.status === 'pending').length || 0
+        : 0;
+      const totalMetrics = analysisRes.status === 'fulfilled'
+        ? (analysisRes.value.data as any[])?.length || 0
+        : 0;
 
       setStats({
-        totalMetrics: metricsRes.data?.length || 0,
-        pendingDocuments: documentsRes.data?.length || 0,
-        pendingAnalysis: analysisRes.data?.length || 0,
+        totalMetrics,
+        pendingDocuments: pendingDocs,
+        pendingAnalysis: 0,
       });
     } catch (error) {
       console.error('Failed to load stats:', error);

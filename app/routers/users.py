@@ -8,7 +8,7 @@ from jose import jwt, JWTError
 import os
 from typing import List
 
-from ..database import get_db
+from ..database import get_db, async_session_factory
 from ..models.user import User, Role
 from ..schemas.auth import UserResponse, LoginResponse
 
@@ -32,7 +32,7 @@ async def get_current_user(request: Request) -> User:
     except JWTError:
         raise HTTPException(status_code=401, detail="Could not validate credentials")
 
-    async with get_db() as db:
+    async with async_session_factory() as db:
         result = await db.execute(select(User).where(User.id == int(user_id_str)))
         user = result.scalar_one_or_none()
         if not user or not user.is_active:

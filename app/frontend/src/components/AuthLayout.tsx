@@ -7,20 +7,34 @@ import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 
 export default function AuthLayout({ children }: { children: React.ReactNode }) {
-  const [loading, setLoading] = useState(true);
   const router = useRouter();
   const isAuthenticated = useAuthStore((state) => state.isAuthenticated);
+  const [hydrated, setHydrated] = useState(false);
 
   useEffect(() => {
-    if (!isAuthenticated) {
-      router.push('/login');
-    } else {
-      setLoading(false);
+    // Zustand persist rehydrates asynchronously — wait for it
+    const unsub = useAuthStore.persist.onFinishHydration(() => {
+      setHydrated(true);
+    });
+    // If already hydrated (e.g. re-render), set immediately
+    if (useAuthStore.persist.hasHydrated()) {
+      setHydrated(true);
     }
-  }, [isAuthenticated, router]);
+    return unsub;
+  }, []);
 
-  if (loading) {
+  useEffect(() => {
+    if (hydrated && !isAuthenticated) {
+      router.push('/login');
+    }
+  }, [hydrated, isAuthenticated, router]);
+
+  if (!hydrated) {
     return <div className="min-h-screen flex items-center justify-center">Loading...</div>;
+  }
+
+  if (!isAuthenticated) {
+    return null; // Will redirect via useEffect
   }
 
   return (

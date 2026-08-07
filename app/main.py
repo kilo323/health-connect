@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import logging
+import sys
 from contextlib import asynccontextmanager
 from sqlalchemy import select
 
@@ -10,7 +11,12 @@ from .routers import auth, health, users, admin
 from .services.scheduler import scheduler
 from .models.settings import ScheduleConfig
 
-logging.basicConfig(level=logging.INFO)
+# Configure logging to stdout with explicit flush
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
 logger = logging.getLogger(__name__)
 
 
@@ -106,4 +112,4 @@ async def root():
 app.include_router(auth.router, prefix="/api")
 app.include_router(health.router, prefix="/api")
 app.include_router(users.router, prefix="/api/users")
-app.include_router(admin.router, prefix="/api/admin")
+app.include_router(admin.router, prefix="/api")

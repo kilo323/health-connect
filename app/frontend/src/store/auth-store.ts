@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { persist } from 'zustand/middleware';
+import { persist, createJSONStorage } from 'zustand/middleware';
 
 interface User {
   id: number;
@@ -15,7 +15,6 @@ interface AuthState {
   setUser: (user: User) => void;
   setToken: (token: string) => void;
   logout: () => void;
-  loadFromStorage: () => void;
 }
 
 export const useAuthStore = create<AuthState>()(
@@ -36,20 +35,14 @@ export const useAuthStore = create<AuthState>()(
         localStorage.removeItem('token');
         set({ user: null, token: null, isAuthenticated: false });
       },
-
-      loadFromStorage: () => {
-        const token = localStorage.getItem('token');
-        if (token) {
-          set({ token, isAuthenticated: true });
-        }
-      },
     }),
     {
       name: 'health-tracker-auth',
+      storage: createJSONStorage(() => localStorage),
       partialize: (state) => ({ 
         user: state.user, 
         token: state.token,
-        isAuthenticated: state.isAuthenticated
+        isAuthenticated: state.isAuthenticated,
       }),
     }
   )
