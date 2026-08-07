@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import AuthLayout from '@/components/AuthLayout';
 import { Database, Save, Play, Square, Loader2, CheckCircle, AlertCircle, Info } from 'lucide-react';
-import { apiClient } from '@/lib/api-client';
+import apiClient from '@/lib/api-client';
 
 interface ScheduleSettings {
   is_enabled: boolean;

@@ -2,6 +2,8 @@ from sqlalchemy import String, Text, Boolean, DateTime
 from sqlalchemy.orm import Mapped, mapped_column
 from datetime import datetime
 
+from ..database import Base
+
 
 class AppSettings(Base):
     __tablename__ = "app_settings"

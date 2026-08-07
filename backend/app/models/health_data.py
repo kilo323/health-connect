@@ -79,6 +79,7 @@ class Document(Base):
     )
 
     user = relationship("User", back_populates="documents")
+    pending_analyses = relationship("PendingAnalysis", back_populates="document", cascade="all, delete-orphan")
 
 
 class PendingAnalysis(Base):
@@ -93,8 +94,9 @@ class PendingAnalysis(Base):
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
 
-    document = relationship("Document", back_populates="pending_analysis")
+    document = relationship("Document", back_populates="pending_analyses")
     user = relationship("User", back_populates="pending_analyses")
+    pending_metrics = relationship("PendingMetric", back_populates="pending_analysis", cascade="all, delete-orphan")
 
 
 class PendingMetric(Base):

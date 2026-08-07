@@ -2,11 +2,13 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import logging
 from contextlib import asynccontextmanager
+from sqlalchemy import select
 
 from .config import settings
-from .database import engine, init_db, get_db
+from .database import engine, init_db, async_session_factory
 from .routers import auth, health, users, admin
 from .services.scheduler import scheduler
+from .models.settings import ScheduleConfig
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -23,9 +25,9 @@ async def lifespan(app: FastAPI):
     
     # Seed admin account if needed
     from .models.user import User, Role
-    from sqlalchemy.ext.asyncio import AsyncSession
     
-    async with get_db() as db:
+    db = async_session_factory()
+    try:
         result = await db.execute(
             __import__('sqlalchemy').select(User).where(User.username == settings.admin_user)
         )
@@ -38,7 +40,7 @@ async def lifespan(app: FastAPI):
             new_admin = User(
                 username=settings.admin_user,
                 email=f"{settings.admin_user}@localhost",
-                hashed_password=pwd_context.hash(settings.admin_password),
+                hashed_password=pwd_context.hash(settings.admin_password[:72]),  # bcrypt has 72-byte limit
                 role=Role.ADMIN,
                 is_active=True
             )
@@ -47,17 +49,21 @@ async def lifespan(app: FastAPI):
             logger.info(f"Admin account created: {settings.admin_user}")
         else:
             logger.info("Admin account already exists")
+    finally:
+        await db.close()
     
     # Start scheduler if enabled
     try:
-        from sqlalchemy import select, update
-        async with get_db() as db:
-            result = await db.execute(select(ScheduleConfig).first())
+        db = async_session_factory()
+        try:
+            result = await db.execute(select(ScheduleConfig))
             config = result.scalar_one_or_none()
             
             if config and config.is_enabled:
                 await scheduler.start()
                 logger.info(f"Scheduler started with cron: {config.cron_expression}")
+        finally:
+            await db.close()
     except Exception as e:
         logger.error(f"Failed to start scheduler: {e}")
     

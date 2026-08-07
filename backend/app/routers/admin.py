@@ -1,4 +1,6 @@
 """Admin settings router for LLM configuration and schedule management."""
+from __future__ import annotations
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
@@ -6,9 +8,8 @@ import logging
 
 from ..database import get_db
 from ..models.settings import AppSettings, ScheduleConfig
-from ..schemas.auth import TokenResponse
+from ..schemas.auth import Token, UserResponse
 from ..routers.users import get_current_user
-from .users import UserResponse
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
 logger = logging.getLogger(__name__)

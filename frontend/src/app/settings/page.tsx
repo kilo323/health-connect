@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import AuthLayout from '@/components/AuthLayout';
 import { Settings, Link as LinkIcon, Cloud, Bot, Database, CheckCircle, Loader2, AlertCircle } from 'lucide-react';
-import { apiClient } from '@/lib/api-client';
+import apiClient from '@/lib/api-client';
 
 export default function SettingsPage() {
   const [activeTab, setActiveTab] = useState<'google' | 'nextcloud' | 'llm'>('google');

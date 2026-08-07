@@ -5,6 +5,7 @@ import os
 import uuid
 import json
 from datetime import datetime, timezone
+from typing import List
 
 from ..database import get_db
 from ..models.user import User
@@ -23,7 +24,7 @@ from ..services.llm import LLMService
 router = APIRouter(prefix="/health", tags=["Health Data"])
 
 
-@router.get("/metrics/{metric_type}", response_model=list[HealthMetricResponse])
+@router.get("/metrics/{metric_type}", response_model=List[HealthMetricResponse])
 async def get_metrics(metric_type: str, limit: int = 100):
     """Get health metrics for the current user"""
     # In production, get user_id from JWT token
@@ -86,7 +87,7 @@ async def create_metric(metric_data: HealthMetricCreate):
     )
 
 
-@router.get("/sync/configs", response_model=list[SyncConfigResponse])
+@router.get("/sync/configs", response_model=List[SyncConfigResponse])
 async def get_sync_configs():
     """Get sync configurations for the current user"""
     # In production, get user_id from JWT token
@@ -164,7 +165,7 @@ async def google_health_callback(code: str):
     return result
 
 
-@router.get("/documents", response_model=list[DocumentResponse])
+@router.get("/documents", response_model=List[DocumentResponse])
 async def list_documents():
     """List documents for the current user"""
     # In production, get user_id from JWT token
@@ -296,7 +297,7 @@ async def analyze_document(document_id: int):
     }
 
 
-@router.get("/metrics/definitions", response_model=list[MetricDefinitionResponse])
+@router.get("/metrics/definitions", response_model=List[MetricDefinitionResponse])
 async def list_metric_definitions():
     """List all metric definitions"""
     db = await next(get_db())

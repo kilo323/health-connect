@@ -1,9 +1,12 @@
+from __future__ import annotations
+
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from passlib.context import CryptContext
 from jose import jwt, JWTError
 import os
+from typing import List
 
 from ..database import get_db
 from ..models.user import User, Role
@@ -46,7 +49,7 @@ async def get_current_active_user(request: Request) -> User:
     return user
 
 
-async def get_current_active_admin(db: AsyncSession, request: Request) -> User:
+async def get_current_active_admin(request: Request) -> User:
     """Get the current admin user (must be authenticated and have admin role)."""
     user = await get_current_user(request)
     if not user.is_active:

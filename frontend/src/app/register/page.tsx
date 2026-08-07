@@ -4,7 +4,7 @@ import { useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { Activity, Loader2 } from 'lucide-react';
-import { apiClient } from '@/lib/api-client';
+import apiClient from '@/lib/api-client';
 
 export default function RegisterPage() {
   const router = useRouter();

@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy import String, Text, DateTime, Boolean, Enum as SAEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship, DeclarativeBase
 

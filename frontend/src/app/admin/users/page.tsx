@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import AuthLayout from '@/components/AuthLayout';
 import { Users, Search, Plus, Edit2, Shield, UserCheck, UserX, Loader2 } from 'lucide-react';
-import { apiClient } from '@/lib/api-client';
+import apiClient from '@/lib/api-client';
 
 interface User {
   id: number;

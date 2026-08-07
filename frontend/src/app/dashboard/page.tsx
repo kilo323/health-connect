@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import AuthLayout from '@/components/AuthLayout';
 import { Activity, FileText, Stethoscope, TrendingUp } from 'lucide-react';
-import { apiClient } from '@/lib/api-client';
+import apiClient from '@/lib/api-client';
 
 interface Stats {
   totalMetrics: number;

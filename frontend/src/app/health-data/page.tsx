@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import AuthLayout from '@/components/AuthLayout';
 import { Plus, Trash2, Download, Search, Activity } from 'lucide-react';
-import { apiClient } from '@/lib/api-client';
+import apiClient from '@/lib/api-client';
 
 interface HealthMetric {
   id: number;

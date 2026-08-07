@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import AuthLayout from '@/components/AuthLayout';
 import { Bot, Save, Loader2, CheckCircle, AlertCircle } from 'lucide-react';
-import { apiClient } from '@/lib/api-client';
+import apiClient from '@/lib/api-client';
 
 interface LLMConfig {
   base_url: string;

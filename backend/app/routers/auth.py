@@ -27,7 +27,8 @@ def create_access_token(data: dict, expires_delta: timedelta | None = None) -> s
 
 
 def hash_password(password: str) -> str:
-    return pwd_context.hash(password)
+    # bcrypt has a 72-byte password limit - truncate if needed
+    return pwd_context.hash(password[:72])
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:

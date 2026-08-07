@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import AuthLayout from '@/components/AuthLayout';
 import { Stethoscope, CheckCircle, XCircle, ChevronDown, ChevronUp, RefreshCw } from 'lucide-react';
-import { apiClient } from '@/lib/api-client';
+import apiClient from '@/lib/api-client';
 
 interface PendingAnalysis {
   id: number;

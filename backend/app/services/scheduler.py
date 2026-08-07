@@ -22,7 +22,7 @@ class HealthSyncScheduler:
         try:
             # Check if sync is enabled
             db = await next(get_db())
-            result = await db.execute(select(ScheduleConfig).first())
+            result = await db.execute(select(ScheduleConfig))
             config = result.scalar_one_or_none()
             
             if not config or not config.is_enabled:
