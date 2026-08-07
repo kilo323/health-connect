@@ -29,7 +29,7 @@ async def lifespan(app: FastAPI):
     db = async_session_factory()
     try:
         result = await db.execute(
-            __import__('sqlalchemy').select(User).where(User.username == settings.admin_user)
+            __import__('sqlalchemy').select(User).where(User.email == settings.admin_user)
         )
         admin_user = result.scalar_one_or_none()
         
@@ -37,9 +37,11 @@ async def lifespan(app: FastAPI):
             from passlib.context import CryptContext
             pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
             
+            # admin_user is now an email; derive username from it
+            admin_username = settings.admin_user.split("@")[0]
             new_admin = User(
-                username=settings.admin_user,
-                email=f"{settings.admin_user}@localhost",
+                username=admin_username,
+                email=settings.admin_user,
                 hashed_password=pwd_context.hash(settings.admin_password[:72]),  # bcrypt has 72-byte limit
                 role=Role.ADMIN,
                 is_active=True

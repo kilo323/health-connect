@@ -16,4 +16,10 @@ apiClient.interceptors.request.use((config) => {
   return config;
 });
 
+// Add convenience methods to the client
+(apiClient as any).login = async (email: string, password: string) => {
+  const { data } = await apiClient.post('/auth/login', { email, password });
+  return data;
+};
+
 export default apiClient;
