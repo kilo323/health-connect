@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -10,7 +8,7 @@ from typing import List
 
 from ..database import get_db, async_session_factory
 from ..models.user import User, Role
-from ..schemas.auth import UserResponse, LoginResponse
+from ..schemas.auth import UserCreate, UserUpdate, UserResponse, LoginResponse
 
 router = APIRouter(tags=["Users"])
 
@@ -73,6 +71,47 @@ async def me(current_user: User = Depends(get_current_active_user)):
     )
 
 
+@router.post("", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
+async def create_user(
+    user_data: UserCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_admin)
+):
+    """Create a new user (admin only)"""
+    # Check if username is taken
+    result = await db.execute(select(User).where(User.username == user_data.username))
+    existing = result.scalar_one_or_none()
+    if existing:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Username already exists")
+
+    if user_data.email:
+        result = await db.execute(select(User).where(User.email == user_data.email))
+        existing_email = result.scalar_one_or_none()
+        if existing_email:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email already exists")
+
+    pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+    new_user = User(
+        username=user_data.username,
+        email=user_data.email,
+        hashed_password=pwd_context.hash(user_data.password.encode("utf-8")[:72]),
+        role=Role.ADMIN if user_data.role == "admin" else Role.USER,
+        is_active=True
+    )
+    db.add(new_user)
+    await db.commit()
+    await db.refresh(new_user)
+
+    return UserResponse(
+        id=new_user.id,
+        username=new_user.username,
+        email=new_user.email,
+        role=new_user.role.value if isinstance(new_user.role, Role) else new_user.role,
+        is_active=new_user.is_active,
+        created_at=new_user.created_at
+    )
+
+
 @router.get("", response_model=list[UserResponse])
 async def list_users(
     db: AsyncSession = Depends(get_db),
@@ -107,6 +146,41 @@ async def get_user(
 
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+
+    return UserResponse(
+        id=user.id,
+        username=user.username,
+        email=user.email,
+        role=user.role.value if isinstance(user.role, Role) else user.role,
+        is_active=user.is_active,
+        created_at=user.created_at
+    )
+
+
+@router.put("/{user_id}")
+async def update_user(
+    user_id: int,
+    user_data: UserUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_admin)
+):
+    """Update a user's details (admin only)"""
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Check username uniqueness if changed
+    if user_data.username != user.username:
+        existing = await db.execute(select(User).where(User.username == user_data.username))
+        if existing.scalar_one_or_none():
+            raise HTTPException(status_code=409, detail="Username already exists")
+
+    user.username = user_data.username
+    user.email = user_data.email
+    user.role = Role.ADMIN if user_data.role == "admin" else Role.USER
+    await db.commit()
 
     return UserResponse(
         id=user.id,

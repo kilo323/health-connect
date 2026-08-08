@@ -18,6 +18,8 @@ export default function AdminSchedulePage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [syncMessage, setSyncMessage] = useState('');
 
   useEffect(() => {
     loadSettings();
@@ -57,6 +59,20 @@ export default function AdminSchedulePage() {
 
   const handleToggle = async () => {
     await handleSave();
+  };
+
+  const handleSyncNow = async () => {
+    setSyncing(true);
+    setSyncMessage('');
+    try {
+      await apiClient.post('/admin/sync/now');
+      setSyncMessage('Sync started! Data will be fetched from Google Fit.');
+      setTimeout(() => setSyncMessage(''), 5000);
+    } catch (error: any) {
+      setSyncMessage(error.response?.data?.detail || 'Failed to start sync');
+    } finally {
+      setSyncing(false);
+    }
   };
 
   if (loading) {
@@ -203,6 +219,28 @@ export default function AdminSchedulePage() {
             <li>Documents are organized into Unprocessed/, Processed/, and Archived/ folders</li>
             <li>All credentials are encrypted at rest using Fernet encryption</li>
           </ul>
+        </div>
+
+        {/* Sync Now Section */}
+        <div className="mt-6 pt-4 border-t border-gray-200">
+          <h3 className="text-sm font-semibold text-gray-700 mb-2">Manual Sync</h3>
+          <p className="text-xs text-gray-500 mb-3">Trigger an immediate sync of all connected users' health data.</p>
+
+          {syncMessage && (
+            <div className={`rounded-lg p-3 mb-3 text-sm ${syncMessage.includes('Failed') ? 'bg-red-50 text-red-700' : 'bg-blue-50 text-blue-700'}`}>
+              {syncMessage}
+            </div>
+          )}
+
+          <button
+            type="button"
+            onClick={handleSyncNow}
+            disabled={syncing}
+            className="btn-secondary flex items-center gap-2"
+          >
+            {syncing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+            Sync Now
+          </button>
         </div>
       </div>
     </AuthLayout>

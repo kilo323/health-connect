@@ -24,6 +24,12 @@ class LLMConfig(BaseModel):
     model: str = "gpt-4"
 
 
+class ScheduleSettings(BaseModel):
+    """Schedule configuration settings."""
+    is_enabled: bool = False
+    cron_expression: str = "0 2 * * *"
+
+
 class FetchModelsRequest(BaseModel):
     """Request to fetch available models from an endpoint."""
     base_url: str
@@ -170,6 +176,22 @@ async def get_scheduler_status(
     }
 
 
+@router.post("/sync/now")
+async def sync_now(
+    current_user: UserResponse = Depends(get_current_user),
+):
+    """Trigger an immediate health data sync."""
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    from ..services.scheduler import scheduler
+    import asyncio
+
+    # Run the sync in the background so the response returns immediately
+    asyncio.create_task(scheduler._run_sync())
+    return {"message": "Sync started"}
+
+
 @router.get("/llm/models")
 async def fetch_llm_models(
     base_url: str,
@@ -206,3 +228,69 @@ async def fetch_llm_models(
         return {"models": [], "error": "Request timed out. Please check the endpoint URL."}
     except Exception as e:
         return {"models": [], "error": f"Failed to fetch models: {str(e)}"}
+
+
+class GoogleOAuthConfig(BaseModel):
+    """Google OAuth configuration (app-level, set by admin)."""
+    client_id: str
+    client_secret: str
+    redirect_uri: str = ""
+
+
+@router.get("/settings/google-oauth")
+async def get_google_oauth_config(
+    current_user: UserResponse = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Get the app-level Google OAuth configuration (admin only)."""
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    result = await db.execute(
+        select(AppSettings).where(AppSettings.key == "google_oauth_config")
+    )
+    config = result.scalar_one_or_none()
+
+    if not config:
+        return GoogleOAuthConfig(client_id="", client_secret="", redirect_uri="")
+
+    import json
+    try:
+        return GoogleOAuthConfig(**json.loads(config.value))
+    except (json.JSONDecodeError, TypeError):
+        return GoogleOAuthConfig(client_id="", client_secret="", redirect_uri="")
+
+
+@router.put("/settings/google-oauth")
+async def update_google_oauth_config(
+    config: GoogleOAuthConfig,
+    current_user: UserResponse = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Update the app-level Google OAuth configuration (admin only)."""
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    import json
+
+    result = await db.execute(
+        select(AppSettings).where(AppSettings.key == "google_oauth_config")
+    )
+    existing = result.scalar_one_or_none()
+
+    settings_value = json.dumps(config.model_dump())
+
+    if existing:
+        existing.value = settings_value
+        existing.description = "Google OAuth configuration (app-level)"
+    else:
+        new_setting = AppSettings(
+            key="google_oauth_config",
+            value=settings_value,
+            description="Google OAuth configuration (app-level)"
+        )
+        db.add(new_setting)
+
+    await db.commit()
+    logger.info("Google OAuth configuration updated")
+    return {"message": "Google OAuth configuration updated successfully"}

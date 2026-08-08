@@ -31,7 +31,7 @@ export default function PendingAnalysisPage() {
 
   const loadAnalyses = async () => {
     try {
-      const res = await apiClient.get('/pending-analysis');
+      const res = await apiClient.get('/health/pending-analysis');
       setAnalyses(res.data || []);
     } catch (error) {
       console.error('Failed to load analyses:', error);
@@ -42,7 +42,7 @@ export default function PendingAnalysisPage() {
 
   const handleApprove = async (id: number, analysisId: string) => {
     try {
-      await apiClient.post(`/pending-analysis/${analysisId}/approve`);
+      await apiClient.post(`/health/pending-analysis/${analysisId}/approve`);
       loadAnalyses();
     } catch (error) {
       console.error('Approval failed:', error);
@@ -53,7 +53,7 @@ export default function PendingAnalysisPage() {
     if (!confirm('Are you sure? This will discard the extracted metrics.')) return;
     
     try {
-      await apiClient.post(`/pending-analysis/${analysisId}/reject`);
+      await apiClient.post(`/health/pending-analysis/${analysisId}/reject`);
       loadAnalyses();
     } catch (error) {
       console.error('Rejection failed:', error);
@@ -62,7 +62,7 @@ export default function PendingAnalysisPage() {
 
   const handleRetry = async (id: number) => {
     try {
-      await apiClient.post(`/documents/${id}/analyze`);
+      await apiClient.post(`/health/documents/${id}/analyze`);
       loadAnalyses();
     } catch (error) {
       console.error('Retry failed:', error);
@@ -90,13 +90,38 @@ export default function PendingAnalysisPage() {
                 <div className="flex items-center gap-3">
                   <Stethoscope className={`h-5 w-5 ${
                     analysis.status === 'completed' ? 'text-green-600' :
-                    analysis.status === 'error' ? 'text-red-600' :
+                    analysis.status === 'approved' ? 'text-green-600' :
+                    analysis.status === 'error' || analysis.status === 'rejected' ? 'text-red-600' :
                     'text-yellow-600'
                   }`} />
                   <h3 className="font-medium text-gray-900">{analysis.filename}</h3>
                 </div>
 
                 <div className="flex items-center gap-2">
+                  {(analysis.status === 'pending_review') && (
+                    <>
+                      <button
+                        onClick={() => handleApprove(analysis.id, analysis.id.toString())}
+                        className="btn-primary text-sm py-1.5 flex items-center gap-1"
+                      >
+                        <CheckCircle className="h-3 w-3" /> Approve & Save
+                      </button>
+                      <button
+                        onClick={() => handleReject(analysis.id, analysis.id.toString())}
+                        className="text-sm text-red-600 hover:text-red-800 font-medium px-3 py-1.5"
+                      >
+                        Reject
+                      </button>
+                    </>
+                  )}
+                  {analysis.status === 'error' && (
+                    <button
+                      onClick={() => handleRetry(analysis.document_id)}
+                      className="btn-secondary text-sm py-1.5 flex items-center gap-1"
+                    >
+                      <RefreshCw className="h-3 w-3" /> Retry
+                    </button>
+                  )}
                   <button
                     onClick={() => setExpandedId(expandedId === analysis.id ? null : analysis.id)}
                     className="p-1 hover:bg-gray-100 rounded"
@@ -107,15 +132,6 @@ export default function PendingAnalysisPage() {
                       <ChevronDown className="h-4 w-4 text-gray-600" />
                     )}
                   </button>
-
-                  {analysis.status === 'error' && (
-                    <button
-                      onClick={() => handleRetry(analysis.document_id)}
-                      className="btn-secondary text-sm py-1.5 flex items-center gap-1"
-                    >
-                      <RefreshCw className="h-3 w-3" /> Retry
-                    </button>
-                  )}
                 </div>
               </div>
 
@@ -143,32 +159,6 @@ export default function PendingAnalysisPage() {
                         ))}
                       </div>
                     </div>
-                  )}
-
-                  {/* Actions */}
-                  {analysis.status === 'completed' && (
-                    <div className="flex gap-2">
-                      <button
-                        onClick={() => handleApprove(analysis.id, analysis.id.toString())}
-                        className="btn-primary flex items-center gap-1"
-                      >
-                        <CheckCircle className="h-4 w-4" /> Approve & Save
-                      </button>
-                      <button
-                        onClick={() => handleReject(analysis.id, analysis.id.toString())}
-                        className="btn-secondary text-red-600 hover:bg-red-50 flex items-center gap-1"
-                      >
-                        <XCircle className="h-4 w-4" /> Reject
-                      </button>
-                    </div>
-                  )}
-
-                  {analysis.status === 'analyzing' && (
-                    <p className="text-sm text-blue-600 font-medium">Analyzing document...</p>
-                  )}
-
-                  {analysis.status === 'pending' && (
-                    <p className="text-sm text-yellow-600 font-medium">Waiting for analysis</p>
                   )}
                 </div>
               )}

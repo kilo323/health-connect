@@ -7,6 +7,13 @@ class UserCreate(BaseModel):
     username: str
     email: EmailStr | None = None
     password: str
+    role: str = "user"
+
+
+class UserUpdate(BaseModel):
+    username: str
+    email: EmailStr | None = None
+    role: str = "user"
 
 
 class UserLogin(BaseModel):

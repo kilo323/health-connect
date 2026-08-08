@@ -1,48 +1,42 @@
 import httpx
-from typing import Optional, Dict, List
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
-from ..models.user import User
+import json
+import os
+from typing import Dict, Any
+from ..database import async_session_factory
+from ..models.settings import AppSettings
 
 
 class LLMService:
-    def __init__(self):
-        self.session = httpx.AsyncClient(timeout=60.0)
 
-    async def get_config(self, user_id: int) -> Dict[str, str]:
-        """Get LLM configuration for a user (or admin defaults)"""
-        from ..models.settings import AppSettings
-        
-        # Try to get per-user config first, fall back to admin defaults
-        try:
-            db = None  # Would need DB session
-            base_url_result = await db.execute(
-                select(AppSettings).where(AppSettings.key == "llm_base_url")
+    async def get_config(self) -> Dict[str, str]:
+        """Get LLM configuration from admin settings"""
+        async with async_session_factory() as db:
+            from sqlalchemy import select
+            result = await db.execute(
+                select(AppSettings).where(AppSettings.key == "llm_config")
             )
-            model_result = await db.execute(
-                select(AppSettings).where(AppSettings.key == "llm_model")
-            )
-            
-            config = {}
-            if base_url_row := base_url_result.scalar_one_or_none():
-                config["base_url"] = base_url_row.value
-            if model_row := model_result.scalar_one_or_none():
-                config["model"] = model_row.value
-            
-            return config
-        except Exception as e:
-            print(f"Error getting LLM config: {e}")
-            # Return default OpenAI configuration
-            return {"base_url": "https://api.openai.com/v1", "model": "gpt-4"}
+            config_row = result.scalar_one_or_none()
 
-    async def analyze_document(self, user_id: int, document_content: str) -> Dict[str, any]:
+        if config_row:
+            try:
+                return json.loads(config_row.value)
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        return {
+            "base_url": os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1"),
+            "api_key": os.getenv("OPENAI_API_KEY", ""),
+            "model": os.getenv("OPENAI_MODEL", "gpt-4"),
+        }
+
+    async def analyze_document(self, user_id: int, document_content: str) -> Dict[str, Any]:
         """Analyze a medical document using LLM"""
-        config = await self.get_config(user_id)
-        
+        config = await self.get_config()
+
         prompt = f"""You are a medical document analysis assistant. Analyze the following medical document and extract structured information.
 
 Document content:
-{document_content}
+{document_content[:4000]}
 
 Please provide your analysis in JSON format with the following structure:
 {{
@@ -53,7 +47,7 @@ Please provide your analysis in JSON format with the following structure:
             "value": "Extracted value",
             "unit": "Unit of measurement",
             "reference_range": "Normal reference range if mentioned",
-            "is_important": true/false,
+            "is_important": true,
             "notes": "Any additional notes or observations"
         }}
     ],
@@ -61,46 +55,66 @@ Please provide your analysis in JSON format with the following structure:
         "Recommendation 1",
         "Recommendation 2"
     ],
-    "follow_up_required": true/false,
+    "follow_up_required": true,
     "follow_up_notes": "Notes about required follow-up"
 }}"""
 
+        base_url = config.get("base_url", "").rstrip("/")
+        api_key = config.get("api_key", "")
+        model = config.get("model", "gpt-4")
+
+        if not api_key:
+            raise ValueError("LLM API key not configured. Ask an admin to set up LLM configuration.")
+
         headers = {
             "Content-Type": "application/json",
-            # Get API key from config or environment
-            "Authorization": f"Bearer {self._get_api_key()}"
+            "Authorization": f"Bearer {api_key}",
         }
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=120.0) as client:
             response = await client.post(
-                f"{config['base_url']}/chat/completions",
+                f"{base_url}/chat/completions",
                 headers=headers,
                 json={
-                    "model": config["model"],
+                    "model": model,
                     "messages": [
                         {"role": "system", "content": "You are a helpful medical document analysis assistant. Always respond in valid JSON format."},
-                        {"role": "user", "content": prompt}
+                        {"role": "user", "content": prompt},
                     ],
                     "temperature": 0.3,
-                    "max_tokens": 2000
-                }
+                    "max_tokens": 8192,
+                },
             )
 
         if response.status_code != 200:
-            raise ValueError(f"LLM analysis failed: {response.text}")
+            raise ValueError(f"LLM analysis failed ({response.status_code}): {response.text[:200]}")
 
-        return response.json()
-
-    def _get_api_key(self) -> str:
-        """Get API key from environment or config"""
-        import os
-        # Try environment variable first
-        api_key = os.getenv("OPENAI_API_KEY")
-        if api_key:
-            return api_key
-        
-        # Try to get from database - will be handled by caller with proper db session
-        raise ValueError("LLM API key not configured. Please set OPENAI_API_KEY environment variable or configure in admin settings.")
+        result = response.json()
+        content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+        import logging
+        _log = logging.getLogger("llm_debug")
+        _log.warning(f"LLM status={response.status_code}, content_len={len(content)}, keys={list(result.keys())}")
+        if not content:
+            _log.warning(f"LLM full response: {json.dumps(result)[:500]}")
+        try:
+            parsed = json.loads(content)
+            # Handle case where model returns double-encoded JSON
+            if isinstance(parsed, dict) and "summary" in parsed and isinstance(parsed["summary"], str) and parsed["summary"].startswith("{"):
+                try:
+                    inner = json.loads(parsed["summary"])
+                    if isinstance(inner, dict) and "summary" in inner:
+                        return inner
+                except (json.JSONDecodeError, KeyError):
+                    pass
+            return parsed
+        except (json.JSONDecodeError, KeyError):
+            import re
+            cleaned = re.sub(r'^```(?:json)?\s*', '', content.strip())
+            cleaned = re.sub(r'\s*```$', '', cleaned)
+            try:
+                return json.loads(cleaned)
+            except (json.JSONDecodeError, KeyError):
+                return {"summary": content[:500], "findings": [], "recommendations": [], "follow_up_required": False, "follow_up_notes": ""}
 
 
 llm_service = LLMService()

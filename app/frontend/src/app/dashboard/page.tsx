@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import AuthLayout from '@/components/AuthLayout';
 import { Activity, FileText, Stethoscope, TrendingUp } from 'lucide-react';
+import Link from 'next/link';
 import apiClient from '@/lib/api-client';
 
 interface Stats {
@@ -97,14 +98,18 @@ export default function DashboardPage() {
 
         <div className="card">
           <h2 className="text-lg font-semibold text-gray-900 mb-4">Quick Setup</h2>
-          <ul className="space-y-3 text-sm text-gray-600">
-            <li className="flex items-center gap-2">
-              <span className="w-1.5 h-1.5 bg-green-500 rounded-full"></span>
-              Connect Google Health Connect
+          <ul className="space-y-3 text-sm">
+            <li>
+              <Link href="/settings" className="flex items-center gap-2 text-gray-600 hover:text-blue-600 transition-colors">
+                <span className="w-1.5 h-1.5 bg-green-500 rounded-full"></span>
+                Connect Google Health Connect
+              </Link>
             </li>
-            <li className="flex items-center gap-2">
-              <span className="w-1.5 h-1.5 bg-yellow-500 rounded-full"></span>
-              Configure Nextcloud integration
+            <li>
+              <Link href="/settings" className="flex items-center gap-2 text-gray-600 hover:text-blue-600 transition-colors">
+                <span className="w-1.5 h-1.5 bg-yellow-500 rounded-full"></span>
+                Configure Nextcloud integration
+              </Link>
             </li>
           </ul>
         </div>

@@ -29,7 +29,7 @@ export default function AdminDashboardPage() {
     try {
       const [usersRes, docsRes, schedulerRes] = await Promise.all([
         apiClient.get('/admin/users').catch(() => ({ data: [] })),
-        apiClient.get('/documents?status=pending').catch(() => ({ data: [] })),
+        apiClient.get('/health/documents?status=pending').catch(() => ({ data: [] })),
         apiClient.get('/admin/status/scheduler').catch(() => ({ data: { is_running: false } })),
       ]);
 

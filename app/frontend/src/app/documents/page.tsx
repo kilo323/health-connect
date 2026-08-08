@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import AuthLayout from '@/components/AuthLayout';
-import { FileText, Upload, Search, Bot, Eye, Trash2, CheckCircle, XCircle } from 'lucide-react';
+import { FileText, Upload, Search, Bot, Eye, Trash2, CheckCircle, XCircle, Loader2 } from 'lucide-react';
 import apiClient from '@/lib/api-client';
 
 interface Document {
@@ -28,6 +28,7 @@ export default function DocumentsPage() {
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [uploading, setUploading] = useState(false);
+  const [analyzingId, setAnalyzingId] = useState<number | null>(null);
   const [fileInputRef, setFileInputRef] = useState<HTMLInputElement | null>(null);
 
   useEffect(() => {
@@ -36,7 +37,7 @@ export default function DocumentsPage() {
 
   const loadDocuments = async () => {
     try {
-      const res = await apiClient.get('/documents');
+      const res = await apiClient.get('/health/documents');
       setDocuments(res.data || []);
     } catch (error) {
       console.error('Failed to load documents:', error);
@@ -54,7 +55,7 @@ export default function DocumentsPage() {
       for (let i = 0; i < fileInputRef.files.length; i++) {
         formData.append('files', fileInputRef.files[i]);
       }
-      await apiClient.post('/documents/upload', formData, {
+      await apiClient.post('/health/documents/upload', formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
       });
       loadDocuments();
@@ -67,11 +68,14 @@ export default function DocumentsPage() {
   };
 
   const handleAnalyze = async (id: number, filename: string) => {
+    setAnalyzingId(id);
     try {
-      await apiClient.post(`/documents/${id}/analyze`);
+      await apiClient.post(`/health/documents/${id}/analyze`);
       loadDocuments();
     } catch (error) {
       console.error('Analysis failed:', error);
+    } finally {
+      setAnalyzingId(null);
     }
   };
 
@@ -167,12 +171,17 @@ export default function DocumentsPage() {
                 </p>
 
                 <div className="flex items-center gap-2 pt-3 border-t border-gray-100">
-                  {doc.status === 'unprocessed' && (
+                  {(doc.status === 'unprocessed' || doc.status === 'analyzed_pending_review') && (
                     <button
                       onClick={() => handleAnalyze(doc.id, doc.filename)}
+                      disabled={analyzingId === doc.id}
                       className="btn-primary flex-1 text-sm py-2"
                     >
-                      <Bot className="h-3 w-3 mr-1" /> Analyze
+                      {analyzingId === doc.id ? (
+                        <><Loader2 className="h-3 w-3 mr-1 animate-spin" /> Analyzing...</>
+                      ) : (
+                        <><Bot className="h-3 w-3 mr-1" /> {doc.status === 'unprocessed' ? 'Analyze' : 'Re-analyze'}</>
+                      )}
                     </button>
                   )}
                   {doc.status === 'completed' && (

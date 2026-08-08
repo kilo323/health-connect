@@ -37,7 +37,7 @@ export default function HealthDataPage() {
 
   const loadMetrics = async () => {
     try {
-      const res = await apiClient.get('/metrics', { params: { limit: 100 } });
+      const res = await apiClient.get('/health/metrics', { params: { limit: 100 } });
       setMetrics(res.data || []);
     } catch (error) {
       console.error('Failed to load metrics:', error);
@@ -50,7 +50,7 @@ export default function HealthDataPage() {
     if (!value) return;
     
     try {
-      await apiClient.post('/metrics', {
+      await apiClient.post('/health/metrics', {
         metric_type: metricType,
         value: parseFloat(value),
         unit,
@@ -68,7 +68,7 @@ export default function HealthDataPage() {
     if (!confirm('Are you sure?')) return;
     
     try {
-      await apiClient.delete(`/metrics/${id}`);
+      await apiClient.delete(`/health/metrics/${id}`);
       loadMetrics();
     } catch (error) {
       console.error('Failed to delete metric:', error);
@@ -77,7 +77,7 @@ export default function HealthDataPage() {
 
   const handleExport = async () => {
     try {
-      const res = await apiClient.get('/metrics/export', { responseType: 'blob' });
+      const res = await apiClient.get('/health/metrics/export', { responseType: 'blob' });
       const url = window.URL.createObjectURL(new Blob([res.data]));
       const a = document.createElement('a');
       a.href = url;

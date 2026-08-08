@@ -1,90 +1,79 @@
 import httpx
+import json
 from typing import Optional, Dict, Any
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from ..models.user import User
+from ..database import async_session_factory
+from ..models.settings import AppSettings
 from .encryption import encryption_service
 
 
 class GoogleHealthService:
-    BASE_URL = "https://healthconnect.google.com"
+    BASE_URL = "https://fitness.googleapis.com"
 
-    def __init__(self):
-        self.session = httpx.AsyncClient()
-
-    async def get_oauth_url(self, user_id: int) -> str:
-        """Get OAuth URL for the user to authorize Google Health Connect"""
-        # In production, this would use actual Google OAuth2 flow
-        # For now, return a placeholder that shows how it works
-        config = await self._get_user_config(user_id)
-        if not config.get("client_id"):
-            raise ValueError("Google Health Connect not configured for user")
-
-        params = {
-            "client_id": config["client_id"],
-            "redirect_uri": config.get("redirect_uri", f"{self.BASE_URL}/oauth/callback"),
-            "response_type": "code",
-            "scope": "https://www.googleapis.com/auth/healthconnect.read_only",
-            "access_type": "offline",
-            "prompt": "consent"
-        }
-        return f"https://accounts.google.com/o/oauth2/v2/auth?{'&'.join(f'{k}={v}' for k, v in params.items())}"
-
-    async def exchange_code(self, user_id: int, code: str) -> Dict[str, Any]:
-        """Exchange OAuth code for tokens"""
-        config = await self._get_user_config(user_id)
-        if not config.get("client_id") or not config.get("client_secret"):
-            raise ValueError("Google Health Connect credentials not configured")
-
-        token_data = {
-            "grant_type": "authorization_code",
-            "code": code,
-            "redirect_uri": config["redirect_uri"],
-            "client_id": config["client_id"],
-            "client_secret": config["client_secret"]
-        }
-
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{self.BASE_URL}/oauth2/v4/token",
-                data=token_data,
-                headers={"Content-Type": "application/x-www-form-urlencoded"}
+    async def _get_user_tokens(self, user_id: int) -> dict:
+        """Get stored tokens for a user from AppSettings"""
+        async with async_session_factory() as db:
+            result = await db.execute(
+                select(AppSettings).where(AppSettings.key == f"google_health_tokens_{user_id}")
             )
-            response.raise_for_status()
-            tokens = response.json()
+            row = result.scalar_one_or_none()
+            if not row:
+                return {}
+            try:
+                return json.loads(row.value)
+            except (json.JSONDecodeError, TypeError):
+                return {}
 
-        # Encrypt and store tokens
-        encrypted_tokens = {
-            "access_token": encryption_service.encrypt(tokens["access_token"]),
-            "refresh_token": encryption_service.encrypt(tokens.get("refresh_token", "")),
-            "expires_at": str(tokens.get("expires_in", 0))
-        }
+    async def _save_user_tokens(self, user_id: int, encrypted_tokens: dict):
+        """Save encrypted tokens for a user in AppSettings"""
+        async with async_session_factory() as db:
+            key = f"google_health_tokens_{user_id}"
+            result = await db.execute(select(AppSettings).where(AppSettings.key == key))
+            existing = result.scalar_one_or_none()
 
-        await self._save_user_config(user_id, encrypted_tokens)
-        return {"status": "success", "message": "Google Health Connect authorized"}
+            value = json.dumps(encrypted_tokens)
+            if existing:
+                existing.value = value
+            else:
+                db.add(AppSettings(key=key, value=value, description="Google Fit OAuth tokens"))
+            await db.commit()
+
+    async def _get_admin_config(self) -> dict:
+        """Get app-level Google OAuth config (set by admin)"""
+        async with async_session_factory() as db:
+            result = await db.execute(
+                select(AppSettings).where(AppSettings.key == "google_oauth_config")
+            )
+            row = result.scalar_one_or_none()
+            if not row:
+                return {}
+            try:
+                return json.loads(row.value)
+            except (json.JSONDecodeError, TypeError):
+                return {}
 
     async def refresh_access_token(self, user_id: int) -> bool:
         """Refresh the access token using refresh token"""
-        config = await self._get_user_config(user_id)
-        if not config.get("refresh_token"):
+        tokens = await self._get_user_tokens(user_id)
+        admin_config = await self._get_admin_config()
+
+        if not tokens.get("refresh_token") or not admin_config.get("client_id"):
             return False
 
-        # Decrypt refresh token
-        from .encryption import encryption_service as enc_svc
         try:
-            refresh_token = enc_svc.decrypt(config["refresh_token"])
+            refresh_token = encryption_service.decrypt(tokens["refresh_token"])
         except ValueError:
             return False
 
         async with httpx.AsyncClient() as client:
             response = await client.post(
-                f"{self.BASE_URL}/oauth2/v4/token",
+                "https://oauth2.googleapis.com/token",
                 data={
                     "grant_type": "refresh_token",
-                    "client_id": config["client_id"],
-                    "client_secret": config["client_secret"],
-                    "refresh_token": refresh_token
-                }
+                    "client_id": admin_config["client_id"],
+                    "client_secret": admin_config["client_secret"],
+                    "refresh_token": refresh_token,
+                },
             )
 
         if response.status_code == 200:
@@ -92,113 +81,93 @@ class GoogleHealthService:
             encrypted_new_tokens = {
                 "access_token": encryption_service.encrypt(new_tokens["access_token"]),
                 "refresh_token": encryption_service.encrypt(new_tokens.get("refresh_token", refresh_token)),
-                "expires_at": str(new_tokens.get("expires_in", 0))
+                "expires_in": new_tokens.get("expires_in", 0),
             }
-            await self._save_user_config(user_id, encrypted_new_tokens)
+            await self._save_user_tokens(user_id, encrypted_new_tokens)
             return True
 
         return False
 
     async def fetch_health_data(self, user_id: int, data_type: str = "steps") -> list[Dict[str, Any]]:
-        """Fetch health data from Google Health Connect API"""
-        config = await self._get_user_config(user_id)
-        if not config.get("access_token"):
+        """Fetch health data from Google Fit API"""
+        tokens = await self._get_user_tokens(user_id)
+        if not tokens.get("access_token"):
             raise ValueError("No access token - authorize first")
 
-        # Decrypt access token
         try:
-            access_token = encryption_service.decrypt(config["access_token"])
+            access_token = encryption_service.decrypt(tokens["access_token"])
         except ValueError:
             raise ValueError("Failed to decrypt access token")
 
         headers = {
             "Authorization": f"Bearer {access_token}",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
         }
 
-        # Fetch data based on type (steps, sleep, heart_rate, etc.)
-        async with httpx.AsyncClient() as client:
+        # Map data types to Google Fit API dataset names
+        dataset_map = {
+            "steps": "com.google.step_count.delta",
+            "heart_rate": "com.google.heart_rate.bpm",
+            "sleep": "com.google.sleep.segment",
+            "weight": "com.google.weight",
+            "blood_pressure": "com.google.blood_pressure",
+            "blood_glucose": "com.google.blood_glucose",
+            "body_temperature": "com.google.body.temperature",
+            "distance": "com.google.distance.delta",
+            "calories": "com.google.calories.expended",
+        }
+
+        dataset = dataset_map.get(data_type, data_type)
+
+        # Build time range (last 90 days)
+        from datetime import datetime, timedelta, timezone
+        end_time = datetime.now(timezone.utc)
+        start_time = end_time - timedelta(days=90)
+        start_ns = int(start_time.timestamp() * 1e9)
+        end_ns = int(end_time.timestamp() * 1e9)
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            # Try aggregated dataset first
             response = await client.get(
-                f"{self.BASE_URL}/v1/{data_type}",
+                f"{self.BASE_URL}/fitness/v1/users/me/dataSources/{dataset}/datasets/{start_ns}-{end_ns}",
                 headers=headers,
-                params={"limit": 100}
             )
 
-        if response.status_code == 401:
-            # Try to refresh token and retry once
-            if await self.refresh_access_token(user_id):
-                config = await self._get_user_config(user_id)
-                access_token = encryption_service.decrypt(config["access_token"])
-                headers["Authorization"] = f"Bearer {access_token}"
-                response = await client.get(
-                    f"{self.BASE_URL}/v1/{data_type}",
+            if response.status_code == 401:
+                if await self.refresh_access_token(user_id):
+                    tokens = await self._get_user_tokens(user_id)
+                    access_token = encryption_service.decrypt(tokens["access_token"])
+                    headers["Authorization"] = f"Bearer {access_token}"
+                    response = await client.get(
+                        f"{self.BASE_URL}/fitness/v1/users/me/dataSources/{dataset}/datasets/{start_ns}-{end_ns}",
+                        headers=headers,
+                    )
+
+            if response.status_code != 200:
+                raise ValueError(f"Failed to fetch health data ({response.status_code}): {response.text[:200]}")
+
+            data = response.json()
+            points = data.get("point", [])
+
+            # If no aggregated points, try raw data sources for this type
+            if not points:
+                all_sources_resp = await client.get(
+                    f"{self.BASE_URL}/fitness/v1/users/me/dataSources",
                     headers=headers,
-                    params={"limit": 100}
                 )
+                if all_sources_resp.status_code == 200:
+                    raw_sources = [
+                        s["dataStreamId"]
+                        for s in all_sources_resp.json().get("dataSource", [])
+                        if s["dataStreamId"].startswith("raw:") and data_type in s["dataStreamId"]
+                    ]
+                    for raw_source in raw_sources[:5]:
+                        raw_resp = await client.get(
+                            f"{self.BASE_URL}/fitness/v1/users/me/dataSources/{raw_source}/datasets/{start_ns}-{end_ns}",
+                            headers=headers,
+                        )
+                        if raw_resp.status_code == 200:
+                            raw_points = raw_resp.json().get("point", [])
+                            points.extend(raw_points)
 
-        if response.status_code != 200:
-            raise ValueError(f"Failed to fetch health data: {response.text}")
-
-        return response.json()
-
-    async def _get_user_config(self, user_id: int) -> dict:
-        """Get Google Health Connect config for a user"""
-        from ..models.health_data import SyncConfig
-        db = None  # Would need to get DB session from caller
-        try:
-            result = await db.execute(
-                select(SyncConfig).where(
-                    SyncConfig.user_id == user_id,
-                    SyncConfig.data_type == "google_health_connect"
-                )
-            )
-            config_row = result.scalar_one_or_none()
-            if not config_row:
-                return {}
-
-            # Decrypt stored values
-            encrypted_config = {}
-            for key in ["client_id", "client_secret", "redirect_uri"]:
-                if hasattr(config_row, f"encrypted_{key}"):
-                    try:
-                        encrypted_config[key] = encryption_service.decrypt(getattr(config_row, f"encrypted_{key}"))
-                    except ValueError:
-                        pass
-
-            return {**config_row.__dict__, **encrypted_config}
-        except Exception as e:
-            # Log error and return empty config
-            print(f"Error getting user config: {e}")
-            return {}
-
-    async def _save_user_config(self, user_id: int, encrypted_data: dict):
-        """Save encrypted tokens to database"""
-        from ..models.health_data import SyncConfig
-        db = None  # Would need to get DB session from caller
-        try:
-            result = await db.execute(
-                select(SyncConfig).where(
-                    SyncConfig.user_id == user_id,
-                    SyncConfig.data_type == "google_health_connect"
-                )
-            )
-            config_row = result.scalar_one_or_none()
-
-            if config_row:
-                # Update existing record
-                for key in ["access_token", "refresh_token"]:
-                    setattr(config_row, f"encrypted_{key}", encrypted_data.get(key))
-                await db.commit()
-            else:
-                # Create new record with encrypted data
-                new_config = SyncConfig(
-                    user_id=user_id,
-                    data_type="google_health_connect",
-                    is_enabled=True
-                )
-                for key in ["access_token", "refresh_token"]:
-                    setattr(new_config, f"encrypted_{key}", encrypted_data.get(key))
-                db.add(new_config)
-                await db.commit()
-        except Exception as e:
-            print(f"Error saving user config: {e}")
+            return points

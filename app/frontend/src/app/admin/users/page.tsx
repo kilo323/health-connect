@@ -23,6 +23,9 @@ export default function AdminUsersPage() {
   const [newUsername, setNewUsername] = useState('');
   const [newEmail, setNewEmail] = useState('');
   const [newRole, setNewRole] = useState<'admin' | 'user'>('user');
+  const [newPassword, setNewPassword] = useState('');
+  const [showCreateModal, setShowCreateModal] = useState(false);
+  const [creating, setCreating] = useState(false);
 
   useEffect(() => {
     loadUsers();
@@ -81,6 +84,29 @@ export default function AdminUsersPage() {
     }
   };
 
+  const handleCreateUser = async () => {
+    if (!newUsername || !newPassword) return;
+    setCreating(true);
+    try {
+      await apiClient.post('/users', {
+        username: newUsername,
+        email: newEmail || null,
+        password: newPassword,
+        role: newRole,
+      });
+      setShowCreateModal(false);
+      setNewUsername('');
+      setNewEmail('');
+      setNewPassword('');
+      setNewRole('user');
+      loadUsers();
+    } catch (error) {
+      console.error('Failed to create user:', error);
+    } finally {
+      setCreating(false);
+    }
+  };
+
   const filteredUsers = users.filter(user =>
     user.username.toLowerCase().includes(searchQuery.toLowerCase()) ||
     (user.email && user.email.toLowerCase().includes(searchQuery.toLowerCase()))
@@ -94,7 +120,7 @@ export default function AdminUsersPage() {
     <AuthLayout>
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold text-gray-900">User Management</h1>
-        <button onClick={() => {/* Open create user modal */}} className="btn-primary flex items-center gap-2">
+        <button onClick={() => setShowCreateModal(true)} className="btn-primary flex items-center gap-2">
           <Plus className="h-4 w-4" /> Add User
         </button>
       </div>
@@ -181,6 +207,73 @@ export default function AdminUsersPage() {
               ))}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {/* Create User Modal */}
+      {showCreateModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-xl p-6 w-full max-w-md mx-4">
+            <h2 className="text-lg font-semibold text-gray-900 mb-4">Create User</h2>
+            
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Username *</label>
+                <input
+                  type="text"
+                  value={newUsername}
+                  onChange={(e) => setNewUsername(e.target.value)}
+                  className="input-field"
+                  autoFocus
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
+                <input
+                  type="email"
+                  value={newEmail}
+                  onChange={(e) => setNewEmail(e.target.value)}
+                  className="input-field"
+                  placeholder="optional"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Password *</label>
+                <input
+                  type="password"
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  className="input-field"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Role</label>
+                <select
+                  value={newRole}
+                  onChange={(e) => setNewRole(e.target.value as 'admin' | 'user')}
+                  className="input-field"
+                >
+                  <option value="user">User</option>
+                  <option value="admin">Admin</option>
+                </select>
+              </div>
+
+              <div className="flex gap-3 pt-2">
+                <button
+                  onClick={handleCreateUser}
+                  disabled={creating || !newUsername || !newPassword}
+                  className="btn-primary flex-1 flex items-center justify-center gap-2"
+                >
+                  {creating && <Loader2 className="h-4 w-4 animate-spin" />}
+                  Create User
+                </button>
+                <button onClick={() => setShowCreateModal(false)} className="btn-secondary flex-1">Cancel</button>
+              </div>
+            </div>
+          </div>
         </div>
       )}
 

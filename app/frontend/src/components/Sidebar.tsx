@@ -1,8 +1,9 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
+import { useAuthStore } from '@/store/auth-store';
 import { 
   LayoutDashboard, 
   Activity, 
@@ -33,6 +34,8 @@ const adminNavigation = [
 export default function Sidebar() {
   const pathname = usePathname();
   const router = useRouter();
+  const user = useAuthStore((state) => state.user);
+  const isAdmin = user?.role === 'admin';
   
   return (
     <div className="w-64 bg-white border-r border-gray-200 h-screen flex flex-col">
@@ -55,7 +58,7 @@ export default function Sidebar() {
           </Link>
         ))}
 
-        {pathname.startsWith('/admin') && (
+        {isAdmin && (
           <>
             <div className="pt-4 pb-2">
               <p className="px-4 text-xs font-semibold text-gray-400 uppercase tracking-wider">
@@ -78,7 +81,7 @@ export default function Sidebar() {
 
       <div className="p-4 border-t border-gray-100">
         <button
-          onClick={() => router.push('/logout')}
+          onClick={() => { useAuthStore.getState().logout(); router.push('/login'); }}
           className="sidebar-link text-red-600 hover:bg-red-50 hover:text-red-700"
         >
           <LogOut className="h-5 w-5" />
