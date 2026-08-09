@@ -10,6 +10,20 @@ $FrontendDir = Join-Path $ProjectRoot "app\frontend"
 $BackendPort = 8000
 $FrontendPort = 3000
 
+function Load-EnvFile {
+    param([string]$EnvFile)
+    if (Test-Path $EnvFile) {
+        Write-Host "Loading environment variables from $EnvFile" -ForegroundColor Gray
+        Get-Content $EnvFile | ForEach-Object {
+            if ($_ -match '^\s*([A-Z_]+)=(.*)') {
+                $name = $matches[1]
+                $value = $matches[2].Trim('"').Trim("'")
+                [Environment]::SetEnvironmentVariable($name, $value, "Process")
+            }
+        }
+    }
+}
+
 function Stop-ServiceByPort {
     param([int]$Port, [string]$Name)
     $connections = Get-NetTCPConnection -LocalPort $Port -ErrorAction SilentlyContinue |
@@ -31,22 +45,16 @@ function Stop-ServiceByPort {
 
 function Start-Backend {
     Write-Host "`nStarting backend on port $BackendPort..." -ForegroundColor Cyan
+    Load-EnvFile (Join-Path $ProjectRoot ".env")
     $venvActivate = Join-Path $BackendDir ".venv\Scripts\Activate.ps1"
-    $startCmd = "& '$venvActivate'; python -m uvicorn app.main:app --reload --host 0.0.0.0 --port $BackendPort"
-    Start-Process powershell -ArgumentList @(
-        "-NoExit",
-        "-Command", "cd '$ProjectRoot'; $startCmd"
-    ) -WindowStyle Normal
-    Write-Host "Backend started in a new window." -ForegroundColor Green
+    & $venvActivate
+    python -m uvicorn app.main:app --reload --host 0.0.0.0 --port $BackendPort
 }
 
 function Start-Frontend {
     Write-Host "`nStarting frontend on port $FrontendPort..." -ForegroundColor Cyan
-    Start-Process powershell -ArgumentList @(
-        "-NoExit",
-        "-Command", "cd '$FrontendDir'; npm run dev"
-    ) -WindowStyle Normal
-    Write-Host "Frontend started in a new window." -ForegroundColor Green
+    cd $FrontendDir
+    npm run dev
 }
 
 # --- Main ---
