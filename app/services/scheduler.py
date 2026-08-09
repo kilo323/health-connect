@@ -6,6 +6,7 @@ import logging
 
 from ..database import async_session_factory
 from ..models.settings import ScheduleConfig, AppSettings
+from ..models.health_data import DocumentStatus
 from ..services.google_health import GoogleHealthService
 from ..services.nextcloud import NextcloudService
 
@@ -85,7 +86,12 @@ class HealthSyncScheduler:
 
             google_service = GoogleHealthService()
 
-            data_types = ["steps", "heart_rate", "sleep", "weight", "distance", "calories"]
+            data_types = [
+                "steps", "heart_rate", "sleep", "weight", "distance", "calories",
+                "blood_pressure", "blood_glucose", "body_temperature",
+                "oxygen_saturation", "body_fat_percentage", "height",
+                "heart_minutes", "move_minutes", "bmr", "speed",
+            ]
             unit_map = {
                 "steps": "count",
                 "heart_rate": "bpm",
@@ -93,14 +99,59 @@ class HealthSyncScheduler:
                 "weight": "kg",
                 "distance": "meters",
                 "calories": "kcal",
+                "blood_pressure": "mmHg",
+                "blood_glucose": "mg/dL",
+                "body_temperature": "°C",
+                "oxygen_saturation": "%",
+                "body_fat_percentage": "%",
+                "height": "meters",
+                "heart_minutes": "Heart Points",
+                "move_minutes": "minutes",
+                "bmr": "kcal/day",
+                "speed": "m/s",
             }
 
             for user_id in user_ids:
+                # Load per-user sync settings
+                sync_days_back = 7  # default
+                last_google_sync = None
+                try:
+                    async with async_session_factory() as db:
+                        settings_result = await db.execute(
+                            select(AppSettings).where(
+                                AppSettings.key == f"sync_settings_{user_id}"
+                            )
+                        )
+                        settings_row = settings_result.scalar_one_or_none()
+                        if settings_row:
+                            import json as _json
+                            settings_data = _json.loads(settings_row.value)
+                            sync_days_back = settings_data.get("sync_days_back", 7)
+                            last_str = settings_data.get("last_google_sync")
+                            if last_str:
+                                last_google_sync = datetime.fromisoformat(last_str)
+                except Exception:
+                    pass
+
+                # Compute time window: from last sync minus overlap, through now
+                from datetime import datetime, timedelta, timezone
+                end_time = datetime.now(timezone.utc)
+                if last_google_sync:
+                    # Start from last sync minus a small overlap (1 day) to catch late-arriving data
+                    start_time = last_google_sync - timedelta(days=1)
+                else:
+                    # First sync: go back sync_days_back days
+                    start_time = end_time - timedelta(days=sync_days_back)
+
+                logger.info(f"Syncing user {user_id}: {start_time.isoformat()} to {end_time.isoformat()} (days_back={sync_days_back})")
+
                 for data_type in data_types:
                     try:
                         health_data = await google_service.fetch_health_data(
                             user_id=user_id,
-                            data_type=data_type
+                            data_type=data_type,
+                            start_time=start_time,
+                            end_time=end_time,
                         )
 
                         if not health_data:
@@ -151,6 +202,32 @@ class HealthSyncScheduler:
                     except Exception as e:
                         logger.warning(f"Error syncing {data_type} for user {user_id}: {e}")
                         continue
+
+                # Update last_google_sync for this user
+                try:
+                    async with async_session_factory() as db:
+                        import json as _json
+                        settings_key = f"sync_settings_{user_id}"
+                        result = await db.execute(
+                            select(AppSettings).where(AppSettings.key == settings_key)
+                        )
+                        existing = result.scalar_one_or_none()
+                        data = {}
+                        if existing:
+                            try:
+                                data = _json.loads(existing.value)
+                            except (json.JSONDecodeError, TypeError):
+                                pass
+                        data["last_google_sync"] = end_time.isoformat()
+                        value = _json.dumps(data)
+                        if existing:
+                            existing.value = value
+                        else:
+                            db.add(AppSettings(key=settings_key, value=value, description="User sync settings"))
+                        await db.commit()
+                        logger.info(f"Updated last_google_sync for user {user_id}")
+                except Exception as e:
+                    logger.warning(f"Failed to update last_google_sync for user {user_id}: {e}")
 
             # --- Scan Nextcloud documents for new files ---
             # Find ALL users with Nextcloud configured (not just Google token users)
@@ -237,7 +314,7 @@ class HealthSyncScheduler:
                                         file_type=file_type_map.get(ext, 'unknown'),
                                         source="nextcloud",
                                         size_bytes=len(content),
-                                        status="unprocessed",
+                                        status=DocumentStatus.UNPROCESSED,
                                     )
                                     db.add(doc)
                                     await db.commit()

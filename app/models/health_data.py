@@ -29,7 +29,8 @@ class HealthMetric(Base):
     value: Mapped[float] = mapped_column(Float, nullable=False)
     unit: Mapped[str] = mapped_column(String(50))
     recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    source: Mapped[str] = mapped_column(String(100))  # "google_health_connect", "manual"
+    source: Mapped[str] = mapped_column(String(100))  # "google_health_connect", "manual", "document_analysis"
+    source_document: Mapped[str | None] = mapped_column(String(255), nullable=True)  # filename if imported from document
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
@@ -90,6 +91,7 @@ class PendingAnalysis(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
     raw_analysis: Mapped[str | None] = mapped_column(Text)  # JSON string of LLM output
     status: Mapped[str] = mapped_column(String(50), default="pending_review")
+    test_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)  # date the test was performed
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
@@ -112,5 +114,22 @@ class PendingMetric(Base):
     metric_definition = relationship("MetricDefinition")
 
 
+class BatchJob(Base):
+    __tablename__ = "batch_jobs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="running")  # running, completed, failed
+    total: Mapped[int] = mapped_column(default=0)
+    processed: Mapped[int] = mapped_column(default=0)
+    errors: Mapped[int] = mapped_column(default=0)
+    current_filename: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    error_details: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON array
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 # Relationship fixes should be done in __init__.py to avoid circular imports
-__all__ = ["HealthMetric", "SyncConfig", "Document", "PendingAnalysis", "PendingMetric"]
+__all__ = ["HealthMetric", "SyncConfig", "Document", "PendingAnalysis", "PendingMetric", "BatchJob"]

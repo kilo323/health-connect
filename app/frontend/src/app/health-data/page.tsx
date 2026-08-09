@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import AuthLayout from '@/components/AuthLayout';
-import { Plus, Trash2, Download, Search, Activity } from 'lucide-react';
+import { Plus, Trash2, Download, Search, Activity, Filter } from 'lucide-react';
 import apiClient from '@/lib/api-client';
 
 interface HealthMetric {
@@ -12,6 +12,7 @@ interface HealthMetric {
   unit: string;
   recorded_at: string;
   source: string;
+  source_document?: string | null;
 }
 
 const METRIC_TYPES = [
@@ -19,11 +20,29 @@ const METRIC_TYPES = [
   'cholesterol', 'temperature', 'spo2', 'sleep_hours', 'steps'
 ];
 
+// Convert kg to lbs for weight display
+function formatValue(metric: HealthMetric): string {
+  if (metric.metric_type === 'weight' && metric.unit === 'kg') {
+    return (metric.value * 2.20462).toFixed(1);
+  }
+  return metric.value.toString();
+}
+
+function formatUnit(metric: HealthMetric): string {
+  if (metric.metric_type === 'weight' && metric.unit === 'kg') {
+    return 'lbs';
+  }
+  return metric.unit;
+}
+
 export default function HealthDataPage() {
   const [metrics, setMetrics] = useState<HealthMetric[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [showAddForm, setShowAddForm] = useState(false);
+  const [filterYear, setFilterYear] = useState<string>('all');
+  const [filterMetricType, setFilterMetricType] = useState<string>('all');
+  const [availableTypes, setAvailableTypes] = useState<string[]>([]);
   
   // Add form state
   const [metricType, setMetricType] = useState(METRIC_TYPES[0]);
@@ -31,14 +50,24 @@ export default function HealthDataPage() {
   const [unit, setUnit] = useState('mmHg');
   const [source, setSource] = useState('manual');
 
+  // Generate year options (current year back to 2020)
+  const currentYear = new Date().getFullYear();
+  const yearOptions = Array.from({ length: currentYear - 2019 }, (_, i) => currentYear - i);
+
   useEffect(() => {
     loadMetrics();
-  }, []);
+  }, [filterYear]);
 
   const loadMetrics = async () => {
     try {
-      const res = await apiClient.get('/health/metrics', { params: { limit: 100 } });
-      setMetrics(res.data || []);
+      const params: Record<string, string | number> = { limit: 500 };
+      if (filterYear !== 'all') params.year = parseInt(filterYear);
+      const res = await apiClient.get('/health/metrics', { params });
+      const data = res.data || [];
+      setMetrics(data);
+      // Extract unique metric types for filter dropdown
+      const types = [...new Set(data.map((m: HealthMetric) => m.metric_type))].sort();
+      setAvailableTypes(types as string[]);
     } catch (error) {
       console.error('Failed to load metrics:', error);
     } finally {
@@ -88,10 +117,12 @@ export default function HealthDataPage() {
     }
   };
 
-  const filteredMetrics = metrics.filter(m => 
-    m.metric_type.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    m.unit.toLowerCase().includes(searchQuery.toLowerCase())
-  );
+  const filteredMetrics = metrics.filter(m => {
+    const matchesSearch = m.metric_type.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      m.unit.toLowerCase().includes(searchQuery.toLowerCase());
+    const matchesType = filterMetricType === 'all' || m.metric_type === filterMetricType;
+    return matchesSearch && matchesType;
+  });
 
   if (loading) {
     return <AuthLayout><div className="flex items-center justify-center h-full">Loading...</div></AuthLayout>;
@@ -106,9 +137,9 @@ export default function HealthDataPage() {
         </button>
       </div>
 
-      {/* Search & Export */}
-      <div className="flex items-center gap-3 mb-6">
-        <div className="relative flex-1">
+      {/* Filters */}
+      <div className="flex items-center gap-3 mb-6 flex-wrap">
+        <div className="relative flex-1 min-w-[200px]">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
           <input
             type="text"
@@ -118,6 +149,26 @@ export default function HealthDataPage() {
             className="input-field pl-10"
           />
         </div>
+        <select
+          value={filterYear}
+          onChange={(e) => setFilterYear(e.target.value)}
+          className="input-field w-auto"
+        >
+          <option value="all">All Years</option>
+          {yearOptions.map(y => (
+            <option key={y} value={y}>{y}</option>
+          ))}
+        </select>
+        <select
+          value={filterMetricType}
+          onChange={(e) => setFilterMetricType(e.target.value)}
+          className="input-field w-auto"
+        >
+          <option value="all">All Metrics</option>
+          {availableTypes.map(t => (
+            <option key={t} value={t}>{t.replace(/_/g, ' ')}</option>
+          ))}
+        </select>
         <button onClick={handleExport} className="btn-secondary flex items-center gap-2">
           <Download className="h-4 w-4" /> Export CSV
         </button>
@@ -213,14 +264,17 @@ export default function HealthDataPage() {
               {filteredMetrics.map(metric => (
                 <tr key={metric.id} className="border-b border-gray-50 hover:bg-gray-50">
                   <td className="py-3 px-4 capitalize text-gray-900">{metric.metric_type.replace(/_/g, ' ')}</td>
-                  <td className="py-3 px-4 font-medium text-gray-900">{metric.value}</td>
-                  <td className="py-3 px-4 text-gray-600">{metric.unit}</td>
+                  <td className="py-3 px-4 font-medium text-gray-900">{formatValue(metric)}</td>
+                  <td className="py-3 px-4 text-gray-600">{formatUnit(metric)}</td>
                   <td className="py-3 px-4">
-                    <span className={`px-2 py-1 rounded-full text-xs font-medium ${
-                      metric.source === 'manual' ? 'bg-blue-50 text-blue-700' :
-                      metric.source === 'google_health_connect' ? 'bg-green-50 text-green-700' :
-                      'bg-purple-50 text-purple-700'
-                    }`}>
+                    <span
+                      className={`px-2 py-1 rounded-full text-xs font-medium ${
+                        metric.source === 'manual' ? 'bg-blue-50 text-blue-700' :
+                        metric.source === 'google_fit' ? 'bg-green-50 text-green-700' :
+                        'bg-purple-50 text-purple-700'
+                      }`}
+                      title={metric.source_document ? `Imported from: ${metric.source_document}` : undefined}
+                    >
                       {metric.source.replace(/_/g, ' ')}
                     </span>
                   </td>

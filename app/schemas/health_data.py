@@ -19,6 +19,7 @@ class HealthMetricResponse(BaseModel):
     unit: Optional[str]
     recorded_at: datetime
     source: str
+    source_document: Optional[str] = None
     created_at: datetime
 
     class Config:
@@ -92,6 +93,7 @@ class PendingAnalysisResponse(BaseModel):
     user_id: int
     raw_analysis: Optional[str]
     status: str
+    test_date: Optional[datetime] = None
     created_at: datetime
 
     class Config:

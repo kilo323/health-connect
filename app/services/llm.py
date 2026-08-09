@@ -38,9 +38,12 @@ class LLMService:
 Document content:
 {document_content[:4000]}
 
+IMPORTANT: Look for the date the test, lab, or examination was performed (often labeled as "Date of Service", "Collection Date", "Test Date", "Specimen Date", "Report Date", etc.). This is the date the health data was actually collected, NOT the date the document was uploaded or received. If you find multiple dates, use the specimen/test collection date. If no date can be determined, set test_date to null.
+
 Please provide your analysis in JSON format with the following structure:
 {{
     "summary": "Brief summary of the document",
+    "test_date": "YYYY-MM-DD format date when the test/exam was performed, or null if unknown",
     "findings": [
         {{
             "metric_name": "Name of the metric/finding",

@@ -1,0 +1,313 @@
+'use client';
+
+import { useState, useEffect } from 'react';
+import AuthLayout from '@/components/AuthLayout';
+import { Activity, TrendingUp, TrendingDown, Minus, BarChart3, Loader2 } from 'lucide-react';
+import apiClient from '@/lib/api-client';
+import {
+  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area,
+} from 'recharts';
+
+interface MetricSummary {
+  metric_type: string;
+  latest_value: number;
+  unit: string;
+  recorded_at: string;
+  trend: 'up' | 'down' | 'flat' | null;
+  trend_pct: number | null;
+  recent_avg: number | null;
+  prior_avg: number | null;
+}
+
+interface TimeSeriesPoint {
+  date: string;
+  value: number;
+  unit: string;
+}
+
+interface ReportData {
+  period_days: number;
+  summary: MetricSummary[];
+  time_series: Record<string, TimeSeriesPoint[]>;
+}
+
+const METRIC_LABELS: Record<string, string> = {
+  steps: 'Steps',
+  heart_rate: 'Heart Rate',
+  sleep: 'Sleep',
+  weight: 'Weight',
+  distance: 'Distance',
+  calories: 'Calories',
+  blood_pressure: 'Blood Pressure',
+  blood_glucose: 'Blood Glucose',
+  body_temperature: 'Body Temp',
+  oxygen_saturation: 'SpO2',
+  body_fat_percentage: 'Body Fat %',
+  height: 'Height',
+  heart_minutes: 'Heart Points',
+  move_minutes: 'Move Minutes',
+  bmr: 'BMR',
+  speed: 'Speed',
+};
+
+const METRIC_COLORS: Record<string, string> = {
+  steps: '#3b82f6',
+  heart_rate: '#ef4444',
+  sleep: '#8b5cf6',
+  weight: '#f59e0b',
+  distance: '#10b981',
+  calories: '#f97316',
+  blood_pressure: '#dc2626',
+  blood_glucose: '#06b6d4',
+  body_temperature: '#ec4899',
+  oxygen_saturation: '#14b8a6',
+  body_fat_percentage: '#a855f7',
+  height: '#6366f1',
+  heart_minutes: '#e11d48',
+  move_minutes: '#059669',
+  bmr: '#d97706',
+  speed: '#0ea5e9',
+};
+
+function TrendIcon({ trend }: { trend: 'up' | 'down' | 'flat' | null }) {
+  if (!trend || trend === 'flat') return <Minus className="h-4 w-4 text-gray-400" />;
+  if (trend === 'up') return <TrendingUp className="h-4 w-4 text-green-500" />;
+  return <TrendingDown className="h-4 w-4 text-red-500" />;
+}
+
+function formatValue(value: number, metricType: string): string {
+  if (metricType === 'steps' || metricType === 'heart_minutes' || metricType === 'move_minutes') {
+    return Math.round(value).toLocaleString();
+  }
+  if (metricType === 'distance') {
+    return (value / 1000).toFixed(2); // meters to km
+  }
+  if (metricType === 'sleep') {
+    return (value / 3600000).toFixed(1); // ms to hours
+  }
+  if (metricType === 'calories' || metricType === 'bmr') {
+    return Math.round(value).toLocaleString();
+  }
+  return value.toFixed(1);
+}
+
+function formatUnit(unit: string, metricType: string): string {
+  if (metricType === 'distance') return 'km';
+  if (metricType === 'sleep') return 'hrs';
+  return unit;
+}
+
+export default function ReportsPage() {
+  const [activeTab, setActiveTab] = useState<'overview'>('overview');
+  const [data, setData] = useState<ReportData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [period, setPeriod] = useState(30);
+  const [selectedMetric, setSelectedMetric] = useState<string | null>(null);
+
+  useEffect(() => {
+    loadReport();
+  }, [period]);
+
+  const loadReport = async () => {
+    setLoading(true);
+    try {
+      const res = await apiClient.get('/health/reports/overview', { params: { days: period } });
+      setData(res.data);
+      // Auto-select first metric with time series data
+      if (!selectedMetric && res.data?.summary?.length > 0) {
+        const withData = res.data.summary.find((s: MetricSummary) =>
+          res.data.time_series[s.metric_type]?.length > 0
+        );
+        if (withData) setSelectedMetric(withData.metric_type);
+      }
+    } catch (error) {
+      console.error('Failed to load report:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const tabs = [{ key: 'overview' as const, label: 'Overview', icon: BarChart3 }];
+
+  if (loading) {
+    return (
+      <AuthLayout>
+        <div className="flex items-center justify-center h-full">
+          <Loader2 className="h-8 w-8 animate-spin text-blue-600" />
+        </div>
+      </AuthLayout>
+    );
+  }
+
+  const summary = data?.summary || [];
+  const timeSeries = data?.time_series || {};
+  const chartData = selectedMetric ? timeSeries[selectedMetric] || [] : [];
+
+  return (
+    <AuthLayout>
+      <div className="flex items-center justify-between mb-6">
+        <h1 className="text-2xl font-bold text-gray-900">Reports</h1>
+        <div className="flex items-center gap-2">
+          {[7, 30, 90].map(d => (
+            <button
+              key={d}
+              onClick={() => setPeriod(d)}
+              className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
+                period === d
+                  ? 'bg-blue-600 text-white'
+                  : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+              }`}
+            >
+              {d}d
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Tabs */}
+      <div className="flex gap-1 bg-gray-100 rounded-lg p-1 mb-6 w-fit">
+        {tabs.map(tab => (
+          <button
+            key={tab.key}
+            onClick={() => setActiveTab(tab.key)}
+            className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+              activeTab === tab.key
+                ? 'bg-white text-gray-900 shadow-sm'
+                : 'text-gray-600 hover:text-gray-900'
+            }`}
+          >
+            <tab.icon className="h-4 w-4" />
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
+      {activeTab === 'overview' && (
+        <>
+          {/* Summary Cards */}
+          {summary.length === 0 ? (
+            <div className="card text-center py-12">
+              <Activity className="h-12 w-12 text-gray-300 mx-auto mb-4" />
+              <p className="text-gray-500">No health data yet. Sync from Google Fit or add metrics manually.</p>
+            </div>
+          ) : (
+            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 mb-8">
+              {summary.map(item => {
+                const color = METRIC_COLORS[item.metric_type] || '#6b7280';
+                return (
+                  <div
+                    key={item.metric_type}
+                    onClick={() => setSelectedMetric(item.metric_type)}
+                    className={`card cursor-pointer transition-all hover:shadow-md ${
+                      selectedMetric === item.metric_type ? 'ring-2 ring-blue-500 shadow-md' : ''
+                    }`}
+                  >
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">
+                        {METRIC_LABELS[item.metric_type] || item.metric_type.replace(/_/g, ' ')}
+                      </span>
+                      <div className="flex items-center gap-1">
+                        <TrendIcon trend={item.trend} />
+                        {item.trend_pct !== null && (
+                          <span className={`text-xs font-medium ${
+                            item.trend === 'up' ? 'text-green-600' :
+                            item.trend === 'down' ? 'text-red-600' :
+                            'text-gray-500'
+                          }`}>
+                            {item.trend_pct > 0 ? '+' : ''}{item.trend_pct}%
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    <div className="flex items-baseline gap-1">
+                      <span className="text-2xl font-bold" style={{ color }}>
+                        {formatValue(item.latest_value, item.metric_type)}
+                      </span>
+                      <span className="text-sm text-gray-500">
+                        {formatUnit(item.unit, item.metric_type)}
+                      </span>
+                    </div>
+                    <p className="text-xs text-gray-400 mt-1">
+                      {new Date(item.recorded_at).toLocaleDateString()}
+                    </p>
+                    {item.recent_avg !== null && (
+                      <p className="text-xs text-gray-400">
+                        7d avg: {formatValue(item.recent_avg, item.metric_type)}
+                      </p>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Chart */}
+          {selectedMetric && chartData.length > 0 && (
+            <div className="card">
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-lg font-semibold text-gray-900">
+                  {METRIC_LABELS[selectedMetric] || selectedMetric.replace(/_/g, ' ')} Trend
+                </h2>
+                <span className="text-sm text-gray-500">
+                  {chartData.length} data point{chartData.length !== 1 ? 's' : ''} over {period} days
+                </span>
+              </div>
+              <div className="h-72">
+                <ResponsiveContainer width="100%" height="100%">
+                  <AreaChart data={chartData} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
+                    <defs>
+                      <linearGradient id={`gradient-${selectedMetric}`} x1="0" y1="0" x2="0" y2="1">
+                        <stop
+                          offset="5%"
+                          stopColor={METRIC_COLORS[selectedMetric] || '#3b82f6'}
+                          stopOpacity={0.3}
+                        />
+                        <stop
+                          offset="95%"
+                          stopColor={METRIC_COLORS[selectedMetric] || '#3b82f6'}
+                          stopOpacity={0}
+                        />
+                      </linearGradient>
+                    </defs>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+                    <XAxis
+                      dataKey="date"
+                      tick={{ fontSize: 12 }}
+                      tickFormatter={(v) => {
+                        const d = new Date(v + 'T00:00:00');
+                        return `${d.getMonth() + 1}/${d.getDate()}`;
+                      }}
+                    />
+                    <YAxis tick={{ fontSize: 12 }} width={60} />
+                    <Tooltip
+                      labelFormatter={(v) => new Date(v + 'T00:00:00').toLocaleDateString()}
+                      formatter={(value: number) => [
+                        `${formatValue(value, selectedMetric)} ${formatUnit(chartData[0]?.unit || '', selectedMetric)}`,
+                        METRIC_LABELS[selectedMetric] || selectedMetric,
+                      ]}
+                    />
+                    <Area
+                      type="monotone"
+                      dataKey="value"
+                      stroke={METRIC_COLORS[selectedMetric] || '#3b82f6'}
+                      strokeWidth={2}
+                      fill={`url(#gradient-${selectedMetric})`}
+                    />
+                  </AreaChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+          )}
+
+          {selectedMetric && chartData.length === 0 && summary.length > 0 && (
+            <div className="card text-center py-8">
+              <p className="text-gray-500">
+                No chart data for {METRIC_LABELS[selectedMetric] || selectedMetric} in the last {period} days.
+              </p>
+            </div>
+          )}
+        </>
+      )}
+    </AuthLayout>
+  );
+}

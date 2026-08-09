@@ -13,11 +13,14 @@ import {
   Stethoscope,
   Database,
   Bot,
-  Users
+  Users,
+  LinkIcon,
+  BarChart3
 } from 'lucide-react';
 
 const navigation = [
   { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
+  { name: 'Reports', href: '/reports', icon: BarChart3 },
   { name: 'Health Data', href: '/health-data', icon: Activity },
   { name: 'Documents', href: '/documents', icon: FileText },
   { name: 'Pending Analysis', href: '/pending-analysis', icon: Stethoscope },
@@ -25,8 +28,8 @@ const navigation = [
 ];
 
 const adminNavigation = [
-  { name: 'Admin Dashboard', href: '/admin/dashboard', icon: LayoutDashboard },
   { name: 'Users', href: '/admin/users', icon: Users },
+  { name: 'Google OAuth', href: '/admin/google-oauth', icon: LinkIcon },
   { name: 'LLM Config', href: '/admin/llm-config', icon: Bot },
   { name: 'Schedule', href: '/admin/schedule', icon: Database },
 ];

@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import AuthLayout from '@/components/AuthLayout';
-import { FileText, Upload, Search, Bot, Eye, Trash2, CheckCircle, XCircle, Loader2 } from 'lucide-react';
+import { FileText, Upload, Search, Bot, Eye, Trash2, CheckCircle, XCircle, Loader2, RefreshCw } from 'lucide-react';
 import apiClient from '@/lib/api-client';
 
 interface Document {
@@ -10,7 +10,7 @@ interface Document {
   filename: string;
   file_path: string;
   file_type: string;
-  status: 'unprocessed' | 'analyzing' | 'completed' | 'error';
+  status: 'unprocessed' | 'analyzing' | 'completed' | 'error' | 'rejected' | 'analyzed_pending_review';
   source: string;
   size_bytes: number;
   created_at: string;
@@ -21,6 +21,8 @@ const STATUS_CONFIG = {
   analyzing: { color: 'bg-blue-100 text-blue-800', icon: Bot },
   completed: { color: 'bg-green-100 text-green-800', icon: CheckCircle },
   error: { color: 'bg-red-100 text-red-800', icon: XCircle },
+  rejected: { color: 'bg-red-100 text-red-800', icon: XCircle },
+  analyzed_pending_review: { color: 'bg-purple-100 text-purple-800', icon: Bot },
 };
 
 export default function DocumentsPage() {
@@ -29,7 +31,15 @@ export default function DocumentsPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [uploading, setUploading] = useState(false);
   const [analyzingId, setAnalyzingId] = useState<number | null>(null);
+  const [analyzingAll, setAnalyzingAll] = useState(false);
   const [fileInputRef, setFileInputRef] = useState<HTMLInputElement | null>(null);
+  const [batchProgress, setBatchProgress] = useState<{
+    processed: number;
+    total: number;
+    filename: string | null;
+    errors: number;
+  } | null>(null);
+  const eventSourceRef = useState<EventSource | null>(null);
 
   useEffect(() => {
     loadDocuments();
@@ -51,13 +61,13 @@ export default function DocumentsPage() {
 
     setUploading(true);
     try {
-      const formData = new FormData();
       for (let i = 0; i < fileInputRef.files.length; i++) {
-        formData.append('files', fileInputRef.files[i]);
+        const formData = new FormData();
+        formData.append('file', fileInputRef.files[i]);
+        await apiClient.post('/health/documents/upload', formData, {
+          headers: { 'Content-Type': 'multipart/form-data' },
+        });
       }
-      await apiClient.post('/health/documents/upload', formData, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-      });
       loadDocuments();
     } catch (error) {
       console.error('Upload failed:', error);
@@ -79,11 +89,77 @@ export default function DocumentsPage() {
     }
   };
 
+  const handleAnalyzeAll = async () => {
+    const unprocessed = documents.filter(d => d.status === 'unprocessed');
+    if (unprocessed.length === 0) return;
+    if (!confirm(`Analyze ${unprocessed.length} unprocessed document(s)?`)) return;
+
+    setAnalyzingAll(true);
+    setBatchProgress({ processed: 0, total: unprocessed.length, filename: null, errors: 0 });
+
+    try {
+      const res = await apiClient.post('/health/documents/analyze-all');
+      const { job_id } = res.data;
+
+      if (!job_id) {
+        setAnalyzingAll(false);
+        setBatchProgress(null);
+        return;
+      }
+
+      // Get the base URL for SSE
+      const baseUrl = apiClient.defaults.baseURL || '/api';
+      const token = localStorage.getItem('token') || '';
+      const sse = new EventSource(`${baseUrl}/health/batch-progress/${job_id}?token=${encodeURIComponent(token)}`);
+
+      sse.addEventListener('progress', (e: MessageEvent) => {
+        const data = JSON.parse(e.data);
+        setBatchProgress({
+          processed: data.processed,
+          total: data.total,
+          filename: data.filename,
+          errors: data.errors,
+        });
+      });
+
+      sse.addEventListener('complete', (e: MessageEvent) => {
+        const data = JSON.parse(e.data);
+        setBatchProgress(null);
+        setAnalyzingAll(false);
+        sse.close();
+        loadDocuments();
+        if (data.errors > 0) {
+          alert(`Analyzed ${data.processed} documents. ${data.errors} failed.`);
+        }
+      });
+
+      sse.addEventListener('error', () => {
+        setBatchProgress(null);
+        setAnalyzingAll(false);
+        sse.close();
+        loadDocuments();
+      });
+    } catch (error) {
+      console.error('Batch analysis failed:', error);
+      setAnalyzingAll(false);
+      setBatchProgress(null);
+    }
+  };
+
+  const handleRetry = async (id: number, filename: string) => {
+    try {
+      await apiClient.post(`/health/documents/${id}/retry`);
+      loadDocuments();
+    } catch (error) {
+      console.error('Retry failed:', error);
+    }
+  };
+
   const handleDelete = async (id: number, filename: string) => {
     if (!confirm(`Delete "${filename}"? This cannot be undone.`)) return;
     
     try {
-      await apiClient.delete(`/documents/${id}`);
+      await apiClient.delete(`/health/documents/${id}`);
       loadDocuments();
     } catch (error) {
       console.error('Delete failed:', error);
@@ -103,9 +179,20 @@ export default function DocumentsPage() {
     <AuthLayout>
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold text-gray-900">Documents</h1>
-        <button onClick={() => fileInputRef?.click()} className="btn-primary flex items-center gap-2">
-          <Upload className="h-4 w-4" /> Upload Documents
-        </button>
+        <div className="flex items-center gap-2">
+          {documents.some(d => d.status === 'unprocessed') && (
+            <button onClick={handleAnalyzeAll} disabled={analyzingAll} className="btn-secondary flex items-center gap-2">
+              {analyzingAll ? (
+                <><Loader2 className="h-4 w-4 animate-spin" /> Analyzing All...</>
+              ) : (
+                <><Bot className="h-4 w-4" /> Analyze All</>
+              )}
+            </button>
+          )}
+          <button onClick={() => fileInputRef?.click()} className="btn-primary flex items-center gap-2">
+            <Upload className="h-4 w-4" /> Upload Documents
+          </button>
+        </div>
       </div>
 
       {/* Hidden file input */}
@@ -117,6 +204,31 @@ export default function DocumentsPage() {
         className="hidden"
         onChange={handleFileUpload}
       />
+
+      {/* Batch Analysis Progress */}
+      {batchProgress && (
+        <div className="mb-6 p-4 bg-blue-50 border border-blue-200 rounded-lg">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-sm font-medium text-blue-900">
+              Analyzing {batchProgress.processed} of {batchProgress.total} documents
+            </span>
+            <span className="text-sm text-blue-600">
+              {batchProgress.errors > 0 && `${batchProgress.errors} error${batchProgress.errors !== 1 ? 's' : ''}`}
+            </span>
+          </div>
+          <div className="w-full bg-blue-200 rounded-full h-2.5">
+            <div
+              className="bg-blue-600 h-2.5 rounded-full transition-all duration-300"
+              style={{ width: `${batchProgress.total > 0 ? (batchProgress.processed / batchProgress.total) * 100 : 0}%` }}
+            />
+          </div>
+          {batchProgress.filename && (
+            <p className="text-xs text-blue-600 mt-2 truncate">
+              Currently processing: {batchProgress.filename}
+            </p>
+          )}
+        </div>
+      )}
 
       {/* Search & Upload progress */}
       <div className="flex items-center gap-3 mb-6">
@@ -182,6 +294,14 @@ export default function DocumentsPage() {
                       ) : (
                         <><Bot className="h-3 w-3 mr-1" /> {doc.status === 'unprocessed' ? 'Analyze' : 'Re-analyze'}</>
                       )}
+                    </button>
+                  )}
+                  {(doc.status === 'rejected') && (
+                    <button
+                      onClick={() => handleRetry(doc.id, doc.filename)}
+                      className="btn-secondary flex-1 text-sm py-2"
+                    >
+                      <RefreshCw className="h-3 w-3 mr-1" /> Retry
                     </button>
                   )}
                   {doc.status === 'completed' && (

@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import AuthLayout from '@/components/AuthLayout';
-import { Stethoscope, CheckCircle, XCircle, ChevronDown, ChevronUp, RefreshCw } from 'lucide-react';
+import { Stethoscope, CheckCircle, XCircle, ChevronDown, ChevronUp, RefreshCw, Calendar } from 'lucide-react';
 import apiClient from '@/lib/api-client';
 
 interface PendingAnalysis {
@@ -11,6 +11,7 @@ interface PendingAnalysis {
   filename: string;
   status: 'pending' | 'analyzing' | 'completed' | 'error';
   analysis_summary?: string;
+  test_date?: string | null;
   metrics_extracted?: Array<{
     name: string;
     value: string;
@@ -95,6 +96,12 @@ export default function PendingAnalysisPage() {
                     'text-yellow-600'
                   }`} />
                   <h3 className="font-medium text-gray-900">{analysis.filename}</h3>
+                  {analysis.test_date && (
+                    <span className="flex items-center gap-1 text-xs text-blue-600 bg-blue-50 px-2 py-0.5 rounded-full">
+                      <Calendar className="h-3 w-3" />
+                      Test: {new Date(analysis.test_date).toLocaleDateString()}
+                    </span>
+                  )}
                 </div>
 
                 <div className="flex items-center gap-2">

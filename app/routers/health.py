@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, status, UploadFile, File
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 import os
@@ -11,7 +11,7 @@ from typing import List
 
 from ..database import get_db, async_session_factory
 from ..models.user import User
-from ..models.health_data import Document, PendingAnalysis, PendingMetric, MetricDefinition, HealthMetric
+from ..models.health_data import Document, PendingAnalysis, PendingMetric, MetricDefinition, HealthMetric, BatchJob, DocumentStatus
 from ..models.settings import AppSettings
 from ..schemas.health_data import (
     HealthMetricCreate, HealthMetricResponse,
@@ -31,17 +31,102 @@ router = APIRouter(prefix="/health", tags=["Health Data"])
 logger = logging.getLogger(__name__)
 
 
+def _extract_document_text(document: "Document") -> str:
+    """Extract text content from a document, with multiple fallback strategies."""
+    content = ""
+    try:
+        if document.file_type in ('text', 'csv', 'json', 'xml'):
+            with open(document.file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                content = f.read()
+        elif document.file_type == 'pdf':
+            # Strategy 1: pdfplumber (best for text-based PDFs)
+            try:
+                import pdfplumber
+                with pdfplumber.open(document.file_path) as pdf:
+                    content = "\n".join(page.extract_text() or "" for page in pdf.pages)
+            except Exception:
+                pass
+
+            # Strategy 2: PyMuPDF text extraction (handles some scanned PDFs better)
+            if not content or not content.strip():
+                logger.info(f"pdfplumber got no text from {document.filename}, trying PyMuPDF...")
+                try:
+                    import pymupdf
+                    doc = pymupdf.open(document.file_path)
+                    pymupdf_pages = []
+                    for page in doc:
+                        pymupdf_pages.append(page.get_text())
+                    content = "\n".join(pymupdf_pages)
+                    doc.close()
+                except Exception as e:
+                    logger.warning(f"PyMuPDF text extraction failed for {document.filename}: {e}")
+
+            # Strategy 3: OCR via PyMuPDF rendering + pytesseract (for true scanned PDFs)
+            if not content or not content.strip():
+                logger.info(f"No text from PyMuPDF for {document.filename}, trying OCR...")
+                try:
+                    import pymupdf
+                    import pytesseract
+                    from PIL import Image
+                    # Point to Tesseract installation on Windows
+                    pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+                    doc = pymupdf.open(document.file_path)
+                    ocr_pages = []
+                    for page in doc:
+                        pix = page.get_pixmap(dpi=200)
+                        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                        ocr_pages.append(pytesseract.image_to_string(img))
+                    content = "\n".join(ocr_pages)
+                    doc.close()
+                except Exception as e:
+                    logger.warning(f"OCR failed for {document.filename}: {e}")
+
+        elif document.file_type == 'image':
+            try:
+                from PIL import Image
+                import pytesseract
+                pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+                img = Image.open(document.file_path)
+                content = pytesseract.image_to_string(img)
+            except Exception as e:
+                logger.warning(f"Image OCR failed for {document.filename}: {e}")
+        else:
+            with open(document.file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                content = f.read()
+    except Exception as e:
+        logger.warning(f"Failed to extract text from {document.filename}: {e}")
+    return content or ""
+
+
 @router.get("/metrics", response_model=List[HealthMetricResponse])
 async def list_all_metrics(
     metric_type: str = None,
+    year: int = None,
     limit: int = 100,
     current_user: UserResponse = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    """Get all health metrics for the current user, optionally filtered by type"""
-    query = select(HealthMetric).where(HealthMetric.user_id == current_user.id)
+    """Get all health metrics for the current user, optionally filtered by type and year"""
+    from sqlalchemy import func
+    # Build base filter
+    base_filters = [HealthMetric.user_id == current_user.id]
     if metric_type:
-        query = query.where(HealthMetric.metric_type == metric_type)
+        base_filters.append(HealthMetric.metric_type == metric_type)
+    if year:
+        base_filters.append(func.strftime('%Y', HealthMetric.recorded_at) == str(year))
+
+    # Deduplicate by taking latest per metric_type per day
+    subq = (
+        select(
+            HealthMetric.metric_type,
+            func.date(HealthMetric.recorded_at).label('day'),
+            func.max(HealthMetric.id).label('max_id'),
+        )
+        .where(*base_filters)
+        .group_by(HealthMetric.metric_type, func.date(HealthMetric.recorded_at))
+        .subquery()
+    )
+    query = select(HealthMetric).where(HealthMetric.id == subq.c.max_id)
     query = query.order_by(HealthMetric.recorded_at.desc()).limit(limit)
 
     result = await db.execute(query)
@@ -56,6 +141,7 @@ async def list_all_metrics(
             unit=m.unit,
             recorded_at=m.recorded_at,
             source=m.source,
+            source_document=m.source_document,
             created_at=m.created_at
         )
         for m in metrics
@@ -104,7 +190,7 @@ async def create_metric(
         user_id=current_user.id,
         metric_type=metric_data.metric_type,
         value=metric_data.value,
-        unit=metric_data.unit,
+        unit=metric_data.unit or "",
         recorded_at=metric_data.recorded_at or datetime.now(timezone.utc),
         source=metric_data.source
     )
@@ -277,6 +363,180 @@ async def disconnect_google_health(
     logger.info(f"Google Health Connect disconnected for user {current_user.id}")
 
     return {"message": "Disconnected successfully"}
+
+
+@router.get("/reports/overview")
+async def get_report_overview(
+    days: int = 30,
+    current_user: UserResponse = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Get health report overview with latest values, trends, and time series data"""
+    from sqlalchemy import func as sa_func
+    from datetime import timedelta
+
+    try:
+        now = datetime.now(timezone.utc)
+        start_date = now - timedelta(days=days)
+        user_id = current_user.id
+
+        # Get latest value per metric type
+        subq = (
+            select(
+                HealthMetric.metric_type,
+                sa_func.max(HealthMetric.id).label("max_id"),
+            )
+            .where(HealthMetric.user_id == user_id)
+            .group_by(HealthMetric.metric_type)
+            .subquery()
+        )
+        latest_result = await db.execute(
+            select(HealthMetric).join(subq, HealthMetric.id == subq.c.max_id)
+        )
+        latest_metrics = latest_result.scalars().all()
+
+        # Get time series data for the requested period
+        ts_result = await db.execute(
+            select(HealthMetric)
+            .where(
+                HealthMetric.user_id == user_id,
+                HealthMetric.recorded_at >= start_date,
+            )
+            .order_by(HealthMetric.recorded_at.asc())
+        )
+        all_metrics = ts_result.scalars().all()
+
+        # Group time series by metric type and date
+        by_type: dict[str, list] = {}
+        for m in all_metrics:
+            by_type.setdefault(m.metric_type, []).append(m)
+
+        # Build time series (daily values) for charting
+        time_series: dict[str, list] = {}
+        for metric_type, metrics in by_type.items():
+            daily: dict[str, dict] = {}
+            for m in metrics:
+                if not m.recorded_at:
+                    continue
+                day_key = m.recorded_at.strftime("%Y-%m-%d")
+                if day_key not in daily or m.recorded_at > daily[day_key]["_ts"]:
+                    daily[day_key] = {
+                        "date": day_key,
+                        "value": m.value,
+                        "unit": m.unit or "",
+                        "_ts": m.recorded_at,
+                    }
+            # Remove internal _ts field and sort
+            time_series[metric_type] = sorted(
+                [{"date": v["date"], "value": v["value"], "unit": v["unit"]} for v in daily.values()],
+                key=lambda x: x["date"],
+            )
+
+        # Build summary cards
+        summary = []
+        for m in latest_metrics:
+            week_ago = now - timedelta(days=7)
+            two_weeks_ago = now - timedelta(days=14)
+
+            recent_result = await db.execute(
+                select(sa_func.avg(HealthMetric.value))
+                .where(
+                    HealthMetric.user_id == user_id,
+                    HealthMetric.metric_type == m.metric_type,
+                    HealthMetric.recorded_at >= week_ago,
+                )
+            )
+            recent_avg = recent_result.scalar()
+
+            prior_result = await db.execute(
+                select(sa_func.avg(HealthMetric.value))
+                .where(
+                    HealthMetric.user_id == user_id,
+                    HealthMetric.metric_type == m.metric_type,
+                    HealthMetric.recorded_at >= two_weeks_ago,
+                    HealthMetric.recorded_at < week_ago,
+                )
+            )
+            prior_avg = prior_result.scalar()
+
+            trend = None
+            trend_pct = None
+            if recent_avg is not None and prior_avg is not None and prior_avg != 0:
+                trend_pct = round(((recent_avg - prior_avg) / abs(prior_avg)) * 100, 1)
+                trend = "up" if trend_pct > 0 else "down" if trend_pct < 0 else "flat"
+
+            summary.append({
+                "metric_type": m.metric_type,
+                "latest_value": m.value,
+                "unit": m.unit or "",
+                "recorded_at": m.recorded_at.isoformat() if m.recorded_at else None,
+                "trend": trend,
+                "trend_pct": trend_pct,
+                "recent_avg": round(recent_avg, 2) if recent_avg else None,
+                "prior_avg": round(prior_avg, 2) if prior_avg else None,
+            })
+
+        return {
+            "period_days": days,
+            "summary": summary,
+            "time_series": time_series,
+        }
+    except Exception as e:
+        logger.error(f"Reports overview failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to generate report: {str(e)[:200]}")
+
+
+@router.get("/sync/settings")
+async def get_sync_settings(
+    current_user: UserResponse = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Get current user's sync settings."""
+    result = await db.execute(
+        select(AppSettings).where(AppSettings.key == f"sync_settings_{current_user.id}")
+    )
+    config = result.scalar_one_or_none()
+    if not config:
+        return {"sync_days_back": 7, "last_google_sync": None}
+    try:
+        return json.loads(config.value)
+    except (json.JSONDecodeError, TypeError):
+        return {"sync_days_back": 7, "last_google_sync": None}
+
+
+@router.put("/sync/settings")
+async def update_sync_settings(
+    settings: dict,
+    current_user: UserResponse = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Update current user's sync settings."""
+    key = f"sync_settings_{current_user.id}"
+    result = await db.execute(select(AppSettings).where(AppSettings.key == key))
+    existing = result.scalar_one_or_none()
+
+    # Merge with existing
+    existing_data = {}
+    if existing:
+        try:
+            existing_data = json.loads(existing.value)
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    if "sync_days_back" in settings:
+        days = settings["sync_days_back"]
+        if not isinstance(days, int) or days < 1 or days > 365:
+            raise HTTPException(status_code=400, detail="sync_days_back must be between 1 and 365")
+        existing_data["sync_days_back"] = days
+
+    value = json.dumps(existing_data)
+    if existing:
+        existing.value = value
+    else:
+        db.add(AppSettings(key=key, value=value, description="User sync settings"))
+
+    await db.commit()
+    return {"message": "Sync settings updated", **existing_data}
 
 
 @router.get("/nextcloud/config")
@@ -634,7 +894,7 @@ async def list_documents(
             filename=d.filename,
             file_path=d.file_path,
             file_type=d.file_type,
-            status=d.status.value if isinstance(d.status, type) else d.status,
+            status=d.status.value if hasattr(d.status, 'value') else str(d.status),
             source=d.source,
             size_bytes=d.size_bytes,
             created_at=d.created_at
@@ -695,6 +955,59 @@ async def upload_document(
         created_at=new_document.created_at
     )
 
+
+@router.post("/documents/{document_id}/retry")
+async def retry_document(
+    document_id: int,
+    current_user: UserResponse = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Reset a rejected/failed document back to unprocessed for re-analysis"""
+    result = await db.execute(
+        select(Document).where(Document.id == document_id, Document.user_id == current_user.id)
+    )
+    document = result.scalar_one_or_none()
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    # Delete associated pending analysis if any
+    pa_result = await db.execute(
+        select(PendingAnalysis).where(PendingAnalysis.document_id == document.id)
+    )
+    pa = pa_result.scalar_one_or_none()
+    if pa:
+        await db.delete(pa)
+
+    document.status = DocumentStatus.UNPROCESSED
+    await db.commit()
+    return {"message": "Document reset for re-analysis"}
+
+
+@router.delete("/documents/{document_id}")
+async def delete_document(
+    document_id: int,
+    current_user: UserResponse = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Delete a document and its associated analysis/metrics"""
+    result = await db.execute(
+        select(Document).where(Document.id == document_id, Document.user_id == current_user.id)
+    )
+    document = result.scalar_one_or_none()
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    # Delete the physical file
+    try:
+        if os.path.exists(document.file_path):
+            os.remove(document.file_path)
+    except OSError:
+        pass
+
+    await db.delete(document)
+    await db.commit()
+    return {"message": "Document deleted"}
+
 @router.post("/pending-analysis/{analysis_id}/approve")
 async def approve_analysis(
     analysis_id: int,
@@ -720,8 +1033,17 @@ async def approve_analysis(
     except (json.JSONDecodeError, TypeError):
         pass
 
-    # Import each finding as a health metric
+    # Import each finding as a health metric (skip duplicates)
     imported = 0
+    # Use the test_date from the document analysis if available, otherwise fall back to now
+    recorded_at = pa.test_date if pa.test_date else datetime.now(timezone.utc)
+    recorded_date = recorded_at.date()
+
+    # Get source document filename
+    source_doc_result = await db.execute(select(Document).where(Document.id == pa.document_id))
+    source_doc = source_doc_result.scalar_one_or_none()
+    source_filename = source_doc.filename if source_doc else None
+
     for finding in findings:
         try:
             value_str = str(finding.get("value", "")).strip()
@@ -731,25 +1053,42 @@ async def approve_analysis(
         except (ValueError, TypeError):
             continue
 
+        metric_name = finding.get("metric_name", "unknown")
+        # Check if this metric already exists for this date (use first() to handle multiple matches)
+        day_start = datetime.combine(recorded_date, datetime.min.time()).replace(tzinfo=timezone.utc)
+        day_end = datetime.combine(recorded_date, datetime.max.time()).replace(tzinfo=timezone.utc)
+        existing = await db.execute(
+            select(HealthMetric).where(
+                HealthMetric.user_id == current_user.id,
+                HealthMetric.metric_type == metric_name,
+                HealthMetric.source == "document_analysis",
+                HealthMetric.recorded_at >= day_start,
+                HealthMetric.recorded_at <= day_end,
+            ).limit(1)
+        )
+        if existing.scalars().first():
+            continue
+
         metric = HealthMetric(
             user_id=current_user.id,
-            metric_type=finding.get("metric_name", "unknown"),
+            metric_type=metric_name,
             value=value,
-            unit=finding.get("unit", ""),
-            recorded_at=datetime.now(timezone.utc),
+            unit=finding.get("unit") or "",
+            recorded_at=recorded_at,
             source="document_analysis",
+            source_document=source_filename,
         )
         db.add(metric)
         imported += 1
 
     # Update analysis status
-    pa.status = "approved"
+    pa.status = DocumentStatus.APPROVED
 
     # Update document status
     doc_result = await db.execute(select(Document).where(Document.id == pa.document_id))
     doc = doc_result.scalar_one_or_none()
     if doc:
-        doc.status = "approved"
+        doc.status = DocumentStatus.APPROVED
 
     await db.commit()
 
@@ -773,12 +1112,12 @@ async def reject_analysis(
     if not pa:
         raise HTTPException(status_code=404, detail="Pending analysis not found")
 
-    pa.status = "rejected"
+    pa.status = DocumentStatus.REJECTED
 
     doc_result = await db.execute(select(Document).where(Document.id == pa.document_id))
     doc = doc_result.scalar_one_or_none()
     if doc:
-        doc.status = "rejected"
+        doc.status = DocumentStatus.REJECTED
 
     await db.commit()
     return {"message": "Analysis rejected"}
@@ -799,25 +1138,8 @@ async def analyze_document(
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
     
-    # Read file content based on type
-    try:
-        if document.file_type in ('text', 'csv', 'json', 'xml'):
-            with open(document.file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                content = f.read()
-        elif document.file_type == 'pdf':
-            import pdfplumber
-            with pdfplumber.open(document.file_path) as pdf:
-                content = "\n".join(page.extract_text() or "" for page in pdf.pages)
-        elif document.file_type == 'image':
-            from PIL import Image
-            import pytesseract
-            img = Image.open(document.file_path)
-            content = pytesseract.image_to_string(img)
-        else:
-            with open(document.file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                content = f.read()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to read document: {str(e)}")
+    # Read file content using shared helper (handles scanned PDFs with OCR)
+    content = _extract_document_text(document)
     
     if not content or not content.strip():
         raise HTTPException(status_code=400, detail="Document appears to be empty or unreadable")
@@ -829,6 +1151,15 @@ async def analyze_document(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"LLM analysis failed: {str(e)}")
     
+    # Parse test_date from LLM response
+    test_date = None
+    test_date_str = analysis_result.get("test_date")
+    if test_date_str:
+        try:
+            test_date = datetime.strptime(test_date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        except (ValueError, TypeError):
+            logger.warning(f"Could not parse test_date from LLM response: {test_date_str}")
+
     # Create or update pending analysis record
     existing_analysis = await db.execute(
         select(PendingAnalysis).where(PendingAnalysis.document_id == document.id)
@@ -838,17 +1169,19 @@ async def analyze_document(
     if pending_analysis:
         pending_analysis.raw_analysis = json.dumps(analysis_result)
         pending_analysis.status = "pending_review"
+        pending_analysis.test_date = test_date
     else:
         pending_analysis = PendingAnalysis(
             document_id=document.id,
             user_id=current_user.id,
             raw_analysis=json.dumps(analysis_result),
-            status="pending_review"
+            status="pending_review",
+            test_date=test_date,
         )
         db.add(pending_analysis)
     
     # Update document status
-    document.status = "analyzed_pending_review"
+    document.status = DocumentStatus.ANALYZED_PENDING_REVIEW
     
     await db.commit()
     await db.refresh(pending_analysis)
@@ -858,6 +1191,238 @@ async def analyze_document(
         "pending_analysis_id": pending_analysis.id,
         "analysis": analysis_result
     }
+
+
+# In-memory event bus for batch job progress (job_id → asyncio.Queue)
+import asyncio
+_batch_queues: dict[int, asyncio.Queue] = {}
+
+
+async def _run_batch_analysis(job_id: int, user_id: int):
+    """Background task that processes documents and emits progress events."""
+    try:
+        async with async_session_factory() as db:
+            # Load job record
+            result = await db.execute(select(BatchJob).where(BatchJob.id == job_id))
+            job = result.scalar_one_or_none()
+            if not job:
+                return
+
+            # Get unprocessed documents
+            docs_result = await db.execute(
+                select(Document).where(
+                    Document.user_id == user_id,
+                    Document.status == DocumentStatus.UNPROCESSED,
+                )
+            )
+            documents = docs_result.scalars().all()
+            job.total = len(documents)
+            await db.commit()
+
+            if not documents:
+                job.status = "completed"
+                job.completed_at = datetime.now(timezone.utc)
+                await db.commit()
+                queue = _batch_queues.get(job_id)
+                if queue:
+                    await queue.put({"event": "complete", "data": {"processed": 0, "total": 0, "errors": 0}})
+                return
+
+            llm_service = LLMService()
+            error_details = []
+
+            for i, document in enumerate(documents):
+                # Update current filename in DB
+                job.current_filename = document.filename
+                await db.commit()
+
+                # Emit progress event
+                queue = _batch_queues.get(job_id)
+                if queue:
+                    await queue.put({
+                        "event": "progress",
+                        "data": {
+                            "processed": job.processed,
+                            "total": job.total,
+                            "filename": document.filename,
+                            "errors": job.errors,
+                        },
+                    })
+
+                try:
+                    # Read file content using shared helper (handles scanned PDFs with OCR)
+                    content = _extract_document_text(document)
+
+                    if not content or not content.strip():
+                        error_details.append({"filename": document.filename, "error": "empty or unreadable"})
+                        job.errors += 1
+                        job.processed += 1
+                        await db.commit()
+                        continue
+
+                    # Analyze with LLM
+                    analysis_result = await llm_service.analyze_document(user_id, content)
+
+                    # Parse test_date
+                    test_date = None
+                    test_date_str = analysis_result.get("test_date")
+                    if test_date_str:
+                        try:
+                            test_date = datetime.strptime(test_date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+                        except (ValueError, TypeError):
+                            pass
+
+                    # Create pending analysis
+                    pending_analysis = PendingAnalysis(
+                        document_id=document.id,
+                        user_id=user_id,
+                        raw_analysis=json.dumps(analysis_result),
+                        status="pending_review",
+                        test_date=test_date,
+                    )
+                    db.add(pending_analysis)
+                    document.status = DocumentStatus.ANALYZED_PENDING_REVIEW
+                    job.processed += 1
+                    await db.commit()
+
+                except Exception as e:
+                    error_details.append({"filename": document.filename, "error": str(e)[:200]})
+                    job.errors += 1
+                    job.processed += 1
+                    await db.commit()
+                    continue
+
+            # Mark job complete
+            job.status = "completed"
+            job.completed_at = datetime.now(timezone.utc)
+            job.current_filename = None
+            job.error_details = json.dumps(error_details) if error_details else None
+            await db.commit()
+
+            # Emit complete event
+            queue = _batch_queues.get(job_id)
+            if queue:
+                await queue.put({
+                    "event": "complete",
+                    "data": {
+                        "processed": job.processed,
+                        "total": job.total,
+                        "errors": job.errors,
+                        "error_details": error_details if error_details else None,
+                    },
+                })
+
+    except Exception as e:
+        logger.error(f"Batch job {job_id} failed: {e}", exc_info=True)
+        try:
+            async with async_session_factory() as db:
+                result = await db.execute(select(BatchJob).where(BatchJob.id == job_id))
+                job = result.scalar_one_or_none()
+                if job:
+                    job.status = "failed"
+                    job.completed_at = datetime.now(timezone.utc)
+                    await db.commit()
+        except Exception:
+            pass
+        queue = _batch_queues.get(job_id)
+        if queue:
+            await queue.put({"event": "error", "data": {"message": str(e)[:200]}})
+    finally:
+        # Cleanup queue after a delay
+        await asyncio.sleep(60)
+        _batch_queues.pop(job_id, None)
+
+
+@router.post("/documents/analyze-all")
+async def analyze_all_documents(
+    current_user: UserResponse = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Start batch analysis of all unprocessed documents. Returns job_id for SSE progress tracking."""
+    # Check for existing running job
+    existing = await db.execute(
+        select(BatchJob).where(
+            BatchJob.user_id == current_user.id,
+            BatchJob.status == "running",
+        )
+    )
+    if existing.scalar_one_or_none():
+        raise HTTPException(status_code=409, detail="A batch analysis is already running")
+
+    # Count unprocessed documents
+    docs_result = await db.execute(
+        select(Document).where(
+            Document.user_id == current_user.id,
+            Document.status == DocumentStatus.UNPROCESSED,
+        )
+    )
+    documents = docs_result.scalars().all()
+    if not documents:
+        return {"message": "No unprocessed documents found", "job_id": None}
+
+    # Create batch job record
+    job = BatchJob(
+        user_id=current_user.id,
+        status="running",
+        total=len(documents),
+        processed=0,
+        errors=0,
+    )
+    db.add(job)
+    await db.commit()
+    await db.refresh(job)
+
+    # Create event queue for this job
+    _batch_queues[job.id] = asyncio.Queue()
+
+    # Spawn background task
+    asyncio.create_task(_run_batch_analysis(job.id, current_user.id))
+
+    return {"message": f"Batch analysis started for {len(documents)} documents", "job_id": job.id}
+
+
+@router.get("/batch-progress/{job_id}")
+async def batch_progress(job_id: int, current_user: UserResponse = Depends(get_current_user)):
+    """SSE endpoint that streams batch analysis progress."""
+    # Verify job belongs to user
+    async with async_session_factory() as db:
+        result = await db.execute(
+            select(BatchJob).where(BatchJob.id == job_id, BatchJob.user_id == current_user.id)
+        )
+        job = result.scalar_one_or_none()
+
+    if not job:
+        raise HTTPException(status_code=404, detail="Batch job not found")
+
+    async def event_stream():
+        queue = _batch_queues.get(job_id)
+
+        # If job is already done, send final state and close
+        if job.status in ("completed", "failed"):
+            yield f"event: complete\ndata: {json.dumps({'processed': job.processed, 'total': job.total, 'errors': job.errors})}\n\n"
+            return
+
+        # Stream events from the queue
+        if queue:
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=30.0)
+                    yield f"event: {event['event']}\ndata: {json.dumps(event['data'])}\n\n"
+                    if event["event"] in ("complete", "error"):
+                        break
+                except asyncio.TimeoutError:
+                    # Send keepalive comment
+                    yield ": keepalive\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.get("/metrics/definitions", response_model=List[MetricDefinitionResponse])
@@ -942,6 +1507,7 @@ async def list_pending_analysis(
             "filename": filename,
             "status": pa.status,
             "analysis_summary": summary,
+            "test_date": pa.test_date.isoformat() if pa.test_date else None,
             "metrics_extracted": [
                 {"name": f.get("metric_name", ""), "value": f.get("value", ""), "unit": f.get("unit", ""), "is_selected": True}
                 for f in findings

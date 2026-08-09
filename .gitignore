@@ -1,3 +1,7 @@
+# local dev
+uploads/
+data/
+
 # Python / Backend
 .venv/
 *.pyc
@@ -25,9 +29,6 @@ out/
 # OS-specific files
 .DS_Store
 Thumbs.db
-
-# Database files (if any are created locally)
-data/
 
 # Logs
 *.log

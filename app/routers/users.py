@@ -16,12 +16,15 @@ SECRET_KEY = os.getenv("JWT_SECRET_KEY", "your-secret-key-change-in-production")
 
 
 async def get_current_user(request: Request) -> User:
-    """Get the current authenticated user from JWT token."""
+    """Get the current authenticated user from JWT token (header or query param)."""
     auth_header = request.headers.get("Authorization", "")
-    if not auth_header.startswith("Bearer "):
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:]
+    else:
+        # Fall back to query parameter (needed for SSE/EventSource which can't set headers)
+        token = request.query_params.get("token", "")
+    if not token:
         raise HTTPException(status_code=401, detail="Not authenticated")
-
-    token = auth_header[7:]  # Remove "Bearer " prefix
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
         user_id_str = payload.get("sub")

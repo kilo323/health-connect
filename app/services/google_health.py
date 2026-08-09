@@ -88,8 +88,14 @@ class GoogleHealthService:
 
         return False
 
-    async def fetch_health_data(self, user_id: int, data_type: str = "steps") -> list[Dict[str, Any]]:
-        """Fetch health data from Google Fit API"""
+    async def fetch_health_data(self, user_id: int, data_type: str = "steps", days_back: int = 90, start_time=None, end_time=None) -> list[Dict[str, Any]]:
+        """Fetch health data from Google Fit API.
+        
+        Args:
+            days_back: Fallback window in days if start_time/end_time not provided
+            start_time: Explicit start datetime (UTC). Overrides days_back.
+            end_time: Explicit end datetime (UTC). Defaults to now.
+        """
         tokens = await self._get_user_tokens(user_id)
         if not tokens.get("access_token"):
             raise ValueError("No access token - authorize first")
@@ -115,14 +121,23 @@ class GoogleHealthService:
             "body_temperature": "com.google.body.temperature",
             "distance": "com.google.distance.delta",
             "calories": "com.google.calories.expended",
+            "oxygen_saturation": "com.google.oxygen_saturation",
+            "body_fat_percentage": "com.google.body.fat.percentage",
+            "height": "com.google.height",
+            "heart_minutes": "com.google.heart_minutes.summary",
+            "move_minutes": "com.google.move_minutes",
+            "bmr": "com.google.calories.bmr",
+            "speed": "com.google.speed",
         }
 
         dataset = dataset_map.get(data_type, data_type)
 
-        # Build time range (last 90 days)
+        # Build time range
         from datetime import datetime, timedelta, timezone
-        end_time = datetime.now(timezone.utc)
-        start_time = end_time - timedelta(days=90)
+        if end_time is None:
+            end_time = datetime.now(timezone.utc)
+        if start_time is None:
+            start_time = end_time - timedelta(days=days_back)
         start_ns = int(start_time.timestamp() * 1e9)
         end_ns = int(end_time.timestamp() * 1e9)
 
