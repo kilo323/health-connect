@@ -61,6 +61,8 @@ function Start-Frontend {
 Write-Host "Health Connect Dev Server" -ForegroundColor Magenta
 Write-Host "=========================" -ForegroundColor Magenta
 
+$venvActivate = Join-Path $BackendDir ".venv\Scripts\Activate.ps1"
+
 switch ($Service) {
     "backend" {
         Stop-ServiceByPort -Port $BackendPort -Name "Backend"
@@ -73,8 +75,16 @@ switch ($Service) {
     default {
         Stop-ServiceByPort -Port $BackendPort -Name "Backend"
         Stop-ServiceByPort -Port $FrontendPort -Name "Frontend"
-        Start-Backend
-        Start-Frontend
+        
+        $backendCmd = "& '$venvActivate'; python -m uvicorn app.main:app --reload --host 0.0.0.0 --port $BackendPort"
+        $frontendCmd = "cd '$FrontendDir'; npm run dev"
+        
+        Start-Process powershell -ArgumentList "-NoExit", "-Command", $backendCmd
+        Start-Process powershell -ArgumentList "-NoExit", "-Command", $frontendCmd
+        
+        Write-Host "Backend starting on port $BackendPort..." -ForegroundColor Green
+        Write-Host "Frontend starting on port $FrontendPort..." -ForegroundColor Green
+        Write-Host "Two new terminal windows should open for each service." -ForegroundColor Gray
     }
 }
 

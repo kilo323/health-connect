@@ -16,3 +16,5 @@ Pillow==11.1.0
 pdfplumber==0.11.5
 PyMuPDF==1.25.3
 pytesseract==0.3.13
+easyocr==1.7.1
+torch==2.4.0 --index-url https://download.pytorch.org/whl/cpu

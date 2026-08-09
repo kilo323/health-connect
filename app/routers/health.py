@@ -31,6 +31,71 @@ router = APIRouter(prefix="/health", tags=["Health Data"])
 logger = logging.getLogger(__name__)
 
 
+def _resolve_tesseract_cmd() -> str | None:
+    """Resolve the Tesseract binary path, or None if not available.
+
+    Priority: OCR_TESSERACT_CMD env var > PATH lookup > common Windows install dirs.
+    """
+    import shutil
+    env = os.environ.get("OCR_TESSERACT_CMD")
+    if env and os.path.isfile(env):
+        return env
+    # Already on PATH?
+    on_path = shutil.which("tesseract")
+    if on_path:
+        return on_path
+    for candidate in (
+        r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+        r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+    ):
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
+# EasyOCR reader is expensive to construct (loads models); cache one per process.
+_easyocr_reader = None
+
+
+def _get_easyocr_reader():
+    """Return a cached EasyOCR reader, or None if EasyOCR is unavailable."""
+    global _easyocr_reader
+    if _easyocr_reader is not None:
+        return _easyocr_reader
+    try:
+        import easyocr
+        # English by default; add more languages via OCR_LANGS env (comma-separated).
+        langs = [l.strip() for l in os.environ.get("OCR_LANGS", "en").split(",") if l.strip()]
+        _easyocr_reader = easyocr.Reader(langs, verbose=False)
+        logger.info("EasyOCR reader initialized")
+    except Exception as e:
+        logger.info(f"EasyOCR not available: {e}")
+        _easyocr_reader = False  # mark as attempted so we don't retry each call
+    return _easyocr_reader or None
+
+
+def _ocr_image(img) -> str:
+    """Run OCR on a PIL.Image, trying Tesseract first then EasyOCR."""
+    tesseract_cmd = _resolve_tesseract_cmd()
+    if tesseract_cmd:
+        try:
+            import pytesseract
+            pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
+            return pytesseract.image_to_string(img)
+        except Exception as e:
+            logger.warning(f"Tesseract OCR failed: {e}")
+    reader = _get_easyocr_reader()
+    if reader:
+        try:
+            import numpy as np
+            results = reader.readtext(np.array(img), detail=0, paragraph=True)
+            return "\n".join(results)
+        except Exception as e:
+            logger.warning(f"EasyOCR failed: {e}")
+    logger.warning("No OCR backend available (Tesseract not installed and EasyOCR unavailable)")
+    return ""
+
+
 def _extract_document_text(document: "Document") -> str:
     """Extract text content from a document, with multiple fallback strategies."""
     content = ""
@@ -61,21 +126,18 @@ def _extract_document_text(document: "Document") -> str:
                 except Exception as e:
                     logger.warning(f"PyMuPDF text extraction failed for {document.filename}: {e}")
 
-            # Strategy 3: OCR via PyMuPDF rendering + pytesseract (for true scanned PDFs)
+            # Strategy 3: OCR via PyMuPDF rendering (for true scanned PDFs)
             if not content or not content.strip():
                 logger.info(f"No text from PyMuPDF for {document.filename}, trying OCR...")
                 try:
                     import pymupdf
-                    import pytesseract
                     from PIL import Image
-                    # Point to Tesseract installation on Windows
-                    pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
                     doc = pymupdf.open(document.file_path)
                     ocr_pages = []
                     for page in doc:
                         pix = page.get_pixmap(dpi=200)
                         img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-                        ocr_pages.append(pytesseract.image_to_string(img))
+                        ocr_pages.append(_ocr_image(img))
                     content = "\n".join(ocr_pages)
                     doc.close()
                 except Exception as e:
@@ -84,10 +146,8 @@ def _extract_document_text(document: "Document") -> str:
         elif document.file_type == 'image':
             try:
                 from PIL import Image
-                import pytesseract
-                pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
                 img = Image.open(document.file_path)
-                content = pytesseract.image_to_string(img)
+                content = _ocr_image(img)
             except Exception as e:
                 logger.warning(f"Image OCR failed for {document.filename}: {e}")
         else:

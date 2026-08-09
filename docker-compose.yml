@@ -1,15 +1,17 @@
 services:
   app:
-    build: .
-    container_name: health-connect
+    build:
+      context: .
+    container_name: health-tracker
     restart: unless-stopped
     ports:
-      - "8080:80"
+      - "3000:3000"
+      - "8000:8000"
     volumes:
       - ./data:/app/data
     environment:
       ADMIN_USER: ${ADMIN_USER:-admin}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-changeme}
-      DATABASE_URL: sqlite+aiosqlite:///./data/health_tracker.db
+      DATABASE_URL: sqlite+aiosqlite:////app/data/health_tracker.db
       FERNET_KEY: ${FERNET_KEY:-$(openssl rand -hex 32)}
 
