@@ -56,7 +56,16 @@ async def lifespan(app: FastAPI):
             await db.commit()
             logger.info(f"Admin account created: {settings.admin_user}")
         else:
-            logger.info("Admin account already exists")
+            # Update password if it doesn't match the configured one
+            from passlib.context import CryptContext
+            pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+            password_bytes = settings.admin_password.encode("utf-8")[:72]
+            if not pwd_context.verify(settings.admin_password, admin_user.hashed_password):
+                admin_user.hashed_password = pwd_context.hash(password_bytes)
+                await db.commit()
+                logger.info(f"Admin password updated for: {settings.admin_user}")
+            else:
+                logger.info("Admin account already exists")
     finally:
         await db.close()
     
