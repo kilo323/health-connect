@@ -1465,22 +1465,10 @@ async def batch_progress(job_id: int, current_user: UserResponse = Depends(get_c
 
 @router.get("/metrics/definitions", response_model=List[MetricDefinitionResponse])
 async def list_metric_definitions():
-    """List all metric definitions"""
+    """List all metric definitions with reference ranges"""
     db = await next(get_db())
     result = await db.execute(select(MetricDefinition).order_by(MetricDefinition.name))
-    definitions = result.scalars().all()
-    
-    return [
-        MetricDefinitionResponse(
-            id=d.id,
-            name=d.name,
-            category=d.category,
-            unit=d.unit,
-            data_type=d.data_type,
-            description=d.description
-        )
-        for d in definitions
-    ]
+    return result.scalars().all()
 
 
 @router.post("/metrics/definitions", response_model=MetricDefinitionResponse, status_code=status.HTTP_201_CREATED)
