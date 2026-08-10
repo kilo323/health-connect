@@ -390,8 +390,9 @@ async def get_report_overview(
 
     try:
         now = datetime.now(timezone.utc)
-        start_date = now - timedelta(days=days)
         user_id = current_user.id
+        # days == 0 is a sentinel for "all time"; otherwise apply a date window
+        start_date = now - timedelta(days=days) if days > 0 else None
 
         # Get latest value per metric type
         subq = (
@@ -409,12 +410,12 @@ async def get_report_overview(
         latest_metrics = latest_result.scalars().all()
 
         # Get time series data for the requested period
+        ts_filters = [HealthMetric.user_id == user_id]
+        if start_date is not None:
+            ts_filters.append(HealthMetric.recorded_at >= start_date)
         ts_result = await db.execute(
             select(HealthMetric)
-            .where(
-                HealthMetric.user_id == user_id,
-                HealthMetric.recorded_at >= start_date,
-            )
+            .where(*ts_filters)
             .order_by(HealthMetric.recorded_at.asc())
         )
         all_metrics = ts_result.scalars().all()
