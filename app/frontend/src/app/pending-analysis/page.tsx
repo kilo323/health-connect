@@ -16,7 +16,9 @@ interface PendingAnalysis {
     name: string;
     value: string;
     unit: string;
+    reference_range?: string;
     is_selected: boolean;
+    match_status?: 'exact' | 'alias' | 'fuzzy' | 'none';
   }>;
   created_at: string;
 }
@@ -158,12 +160,42 @@ export default function PendingAnalysisPage() {
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
                         {analysis.metrics_extracted.map((metric, idx) => (
                           <div key={idx} className="flex items-center justify-between p-2 bg-gray-50 rounded">
-                            <span className="text-sm text-gray-700">{metric.name}</span>
-                            <span className="text-sm font-medium text-gray-900">
-                              {metric.value} {metric.unit}
-                            </span>
+                            <div className="flex items-center gap-2 min-w-0">
+                              {metric.match_status && (
+                                <span className={`flex-shrink-0 text-[10px] px-1.5 py-0.5 rounded-full font-medium ${
+                                  metric.match_status === 'exact' ? 'bg-green-100 text-green-700' :
+                                  metric.match_status === 'alias' ? 'bg-blue-100 text-blue-700' :
+                                  metric.match_status === 'fuzzy' ? 'bg-yellow-100 text-yellow-700' :
+                                  'bg-gray-100 text-gray-500'
+                                }`} title={
+                                  metric.match_status === 'exact' ? 'Matched canonical name' :
+                                  metric.match_status === 'alias' ? 'Matched via alias' :
+                                  metric.match_status === 'fuzzy' ? 'Fuzzy match' :
+                                  'No match — will be stored as-is'
+                                }>
+                                  {metric.match_status === 'exact' ? '✓' :
+                                   metric.match_status === 'alias' ? '≈' :
+                                   metric.match_status === 'fuzzy' ? '~' : '?'}
+                                </span>
+                              )}
+                              <span className="text-sm text-gray-700 truncate">{metric.name}</span>
+                            </div>
+                            <div className="text-right flex-shrink-0 ml-3">
+                              <span className="text-sm font-medium text-gray-900">
+                                {metric.value} {metric.unit}
+                              </span>
+                              {metric.reference_range && (
+                                <div className="text-[11px] text-gray-500">Ref: {metric.reference_range}</div>
+                              )}
+                            </div>
                           </div>
                         ))}
+                      </div>
+                      <div className="mt-2 flex items-center gap-3 text-[11px] text-gray-500">
+                        <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full bg-green-400"></span> Exact</span>
+                        <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full bg-blue-400"></span> Alias</span>
+                        <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full bg-yellow-400"></span> Fuzzy</span>
+                        <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full bg-gray-400"></span> Unmatched</span>
                       </div>
                     </div>
                   )}

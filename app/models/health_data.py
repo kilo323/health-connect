@@ -31,11 +31,14 @@ class HealthMetric(Base):
     recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     source: Mapped[str] = mapped_column(String(100))  # "google_health_connect", "manual", "document_analysis"
     source_document: Mapped[str | None] = mapped_column(String(255), nullable=True)  # filename if imported from document
+    definition_id: Mapped[int | None] = mapped_column(ForeignKey("metric_definitions.id"), nullable=True)  # link to canonical definition
+    reference_range: Mapped[str | None] = mapped_column(String(200), nullable=True)  # e.g. "70-99 mg/dL" from the source document
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
 
     user = relationship("User", back_populates="health_metrics")
+    definition = relationship("MetricDefinition")
 
 
 class SyncConfig(Base):
@@ -57,11 +60,14 @@ class MetricDefinition(Base):
     __tablename__ = "metric_definitions"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)  # canonical name
     category: Mapped[str] = mapped_column(String(50))  # e.g., "Blood Work", "Vital Signs"
-    unit: Mapped[str] = mapped_column(String(50))
+    unit: Mapped[str] = mapped_column(String(50))  # canonical/common unit
     data_type: Mapped[str] = mapped_column(String(20), default="float")  # float, int, string, boolean
     description: Mapped[str | None] = mapped_column(Text)
+    aliases: Mapped[str | None] = mapped_column(Text)  # JSON array of alternate names e.g. ["Creatinine, Serum", "Crea"]
+    reference_ranges: Mapped[str | None] = mapped_column(Text)  # JSON array of range objects
+    unit_conversions: Mapped[str | None] = mapped_column(Text)  # JSON map e.g. {"µmol/L": 88.42}
 
 
 class Document(Base):

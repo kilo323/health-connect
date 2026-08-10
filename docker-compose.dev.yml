@@ -31,10 +31,11 @@ services:
       - FERNET_KEY=${FERNET_KEY:-$(openssl rand -hex 32)}
       # Signal Next.js to use dev server instead of static export
       - NODE_ENV=development
-      # Force polling-based file watching for uvicorn reload inside Docker
-      # (inotify events are unreliable through Windows/macOS volume mounts)
-      - WATCHFILES_FORCE_POLLING=true
-      - WATCHPACK_POLLING=true
+      # File watching mode for uvicorn/Next.js inside Docker.
+      # Set to "true" only if hot-reload doesn't work without it (some
+      # Windows/macOS Docker Desktop setups need polling, but it's CPU-heavy).
+      - WATCHFILES_FORCE_POLLING=${WATCHFILES_FORCE_POLLING:-false}
+      - WATCHPACK_POLLING=${WATCHPACK_POLLING:-false}
       # Point Python (httpx/certifi) at the system CA bundle that includes
       # any corporate certs registered by update-ca-certificates
       - SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt

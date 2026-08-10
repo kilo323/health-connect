@@ -350,3 +350,348 @@ async def reset_llm_prompt(
     save_prompt_template(_DEFAULT_PROMPT)
     logger.info("LLM prompt template reset to default")
     return {"message": "Prompt reset to default", "content": _DEFAULT_PROMPT}
+
+
+# ─── Metric Definitions ────────────────────────────────────────────────────
+
+from ..models.health_data import MetricDefinition, HealthMetric
+from ..schemas.health_data import (
+    MetricDefinitionCreate, MetricDefinitionResponse, UnmatchedMetric,
+)
+
+
+@router.get("/metric-definitions", response_model=list[MetricDefinitionResponse])
+async def list_metric_definitions(
+    current_user: UserResponse = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """List all metric definitions (admin only)."""
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    result = await db.execute(select(MetricDefinition).order_by(MetricDefinition.name))
+    return result.scalars().all()
+
+
+@router.post("/metric-definitions", response_model=MetricDefinitionResponse, status_code=201)
+async def create_metric_definition(
+    data: MetricDefinitionCreate,
+    current_user: UserResponse = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Create a new metric definition (admin only)."""
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    # Check for duplicate name
+    existing = await db.execute(
+        select(MetricDefinition).where(MetricDefinition.name == data.name)
+    )
+    if existing.scalar_one_or_none():
+        raise HTTPException(status_code=409, detail=f"Definition '{data.name}' already exists")
+
+    import json as _json
+
+    definition = MetricDefinition(
+        name=data.name,
+        category=data.category,
+        unit=data.unit,
+        data_type=data.data_type,
+        description=data.description,
+        aliases=_json.dumps(data.aliases or []),
+        reference_ranges=_json.dumps([r.model_dump() for r in (data.reference_ranges or [])]),
+        unit_conversions=_json.dumps(data.unit_conversions or {}),
+    )
+    db.add(definition)
+    await db.commit()
+    await db.refresh(definition)
+
+    # Invalidate normalizer cache
+    from ..services.metric_normalizer import metric_normalizer
+    metric_normalizer._loaded = False
+
+    logger.info(f"Created metric definition: {definition.name}")
+    return definition
+
+
+@router.put("/metric-definitions/{definition_id}", response_model=MetricDefinitionResponse)
+async def update_metric_definition(
+    definition_id: int,
+    data: MetricDefinitionCreate,
+    current_user: UserResponse = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update an existing metric definition (admin only)."""
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    result = await db.execute(
+        select(MetricDefinition).where(MetricDefinition.id == definition_id)
+    )
+    definition = result.scalar_one_or_none()
+    if not definition:
+        raise HTTPException(status_code=404, detail="Definition not found")
+
+    import json as _json
+
+    # Check for name collision with a different definition
+    dup = await db.execute(
+        select(MetricDefinition).where(
+            MetricDefinition.name == data.name,
+            MetricDefinition.id != definition_id,
+        )
+    )
+    if dup.scalar_one_or_none():
+        raise HTTPException(status_code=409, detail=f"Another definition with name '{data.name}' already exists")
+
+    definition.name = data.name
+    definition.category = data.category
+    definition.unit = data.unit
+    definition.data_type = data.data_type
+    definition.description = data.description
+    definition.aliases = _json.dumps(data.aliases or [])
+    definition.reference_ranges = _json.dumps([r.model_dump() for r in (data.reference_ranges or [])])
+    definition.unit_conversions = _json.dumps(data.unit_conversions or {})
+
+    await db.commit()
+    await db.refresh(definition)
+
+    # Invalidate normalizer cache
+    from ..services.metric_normalizer import metric_normalizer
+    metric_normalizer._loaded = False
+
+    logger.info(f"Updated metric definition: {definition.name}")
+    return definition
+
+
+@router.delete("/metric-definitions/{definition_id}")
+async def delete_metric_definition(
+    definition_id: int,
+    current_user: UserResponse = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete a metric definition and unlink associated health metrics (admin only)."""
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    result = await db.execute(
+        select(MetricDefinition).where(MetricDefinition.id == definition_id)
+    )
+    definition = result.scalar_one_or_none()
+    if not definition:
+        raise HTTPException(status_code=404, detail="Definition not found")
+
+    # Unlink health metrics that reference this definition
+    metrics_result = await db.execute(
+        select(HealthMetric).where(HealthMetric.definition_id == definition_id)
+    )
+    for m in metrics_result.scalars().all():
+        m.definition_id = None
+
+    await db.delete(definition)
+    await db.commit()
+
+    # Invalidate normalizer cache
+    from ..services.metric_normalizer import metric_normalizer
+    metric_normalizer._loaded = False
+
+    logger.info(f"Deleted metric definition: {definition.name} (id={definition_id})")
+    return {"message": f"Deleted '{definition.name}' and unlinked associated metrics"}
+
+
+@router.get("/metric-definitions/unmatched", response_model=list[UnmatchedMetric])
+async def get_unmatched_metrics(
+    current_user: UserResponse = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get health metrics that have no matching metric definition (admin only)."""
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    from ..services.metric_normalizer import metric_normalizer
+    return await metric_normalizer.get_unmatched_metrics(db)
+
+
+@router.post("/metric-definitions/normalize")
+async def run_batch_normalization(
+    current_user: UserResponse = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Run retroactive normalization on all unmatched health metrics (admin only)."""
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    from ..services.metric_normalizer import metric_normalizer
+    await metric_normalizer.load(db)
+    updated = await metric_normalizer.retroactive_normalize(db)
+    return {"message": f"Normalized {updated} metrics", "updated_count": updated}
+
+
+@router.post("/metric-definitions/map-unmatched")
+async def map_unmatched_to_definition(
+    payload: dict,
+    current_user: UserResponse = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Map an unmatched metric_type to an existing definition (adds it as an alias).
+
+    Body: { "metric_type": "Creatinine, Serum", "definition_id": 5 }
+    """
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    metric_type = payload.get("metric_type", "").strip()
+    definition_id = payload.get("definition_id")
+
+    if not metric_type or not definition_id:
+        raise HTTPException(status_code=400, detail="metric_type and definition_id are required")
+
+    import json as _json
+
+    # Get the target definition
+    result = await db.execute(
+        select(MetricDefinition).where(MetricDefinition.id == definition_id)
+    )
+    definition = result.scalar_one_or_none()
+    if not definition:
+        raise HTTPException(status_code=404, detail="Definition not found")
+
+    # Add metric_type as an alias if not already present
+    aliases = []
+    if definition.aliases:
+        try:
+            aliases = _json.loads(definition.aliases)
+        except (json.JSONDecodeError, TypeError):
+            aliases = []
+
+    if metric_type not in aliases and metric_type.lower() != definition.name.lower():
+        aliases.append(metric_type)
+        definition.aliases = _json.dumps(aliases)
+
+    # Update all health_metrics with this metric_type
+    metrics_result = await db.execute(
+        select(HealthMetric).where(
+            HealthMetric.metric_type == metric_type,
+            HealthMetric.definition_id.is_(None),
+        )
+    )
+    updated = 0
+    for m in metrics_result.scalars().all():
+        m.definition_id = definition.id
+        m.metric_type = definition.name
+        updated += 1
+
+    await db.commit()
+
+    # Invalidate normalizer cache
+    from ..services.metric_normalizer import metric_normalizer
+    metric_normalizer._loaded = False
+
+    logger.info(f"Mapped '{metric_type}' -> '{definition.name}' (alias added, {updated} metrics updated)")
+    return {
+        "message": f"Mapped '{metric_type}' to '{definition.name}'",
+        "alias_added": True,
+        "metrics_updated": updated,
+    }
+
+
+@router.post("/metric-definitions/refresh-library")
+async def refresh_from_library(
+    current_user: UserResponse = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Load/update metric definitions from the built-in metric library.
+
+    - Creates new definitions for metrics not yet in the database.
+    - Updates existing definitions (merges aliases, overwrites ranges/conversions).
+    - Returns a summary of created vs updated counts.
+    """
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    import json as _json
+    from pathlib import Path
+
+    # Locate the library file
+    data_dir = Path(__file__).resolve().parent.parent.parent / "data"
+    library_path = data_dir / "metric_library.json"
+    if not library_path.exists():
+        # Try Docker path
+        library_path = Path("/app/data/metric_library.json")
+    if not library_path.exists():
+        raise HTTPException(status_code=404, detail="metric_library.json not found")
+
+    try:
+        library = _json.loads(library_path.read_text(encoding="utf-8"))
+    except (_json.JSONDecodeError, OSError) as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read library: {e}")
+
+    created = 0
+    updated = 0
+    skipped = 0
+
+    for entry in library:
+        name = entry.get("name", "").strip()
+        if not name:
+            skipped += 1
+            continue
+
+        # Check if definition already exists
+        result = await db.execute(
+            select(MetricDefinition).where(MetricDefinition.name == name)
+        )
+        existing = result.scalar_one_or_none()
+
+        # Build JSON fields
+        new_aliases = _json.dumps(entry.get("aliases", []))
+        new_ranges = _json.dumps(entry.get("reference_ranges", []))
+        new_conversions = _json.dumps(entry.get("unit_conversions", {}))
+
+        if existing:
+            # Merge aliases — keep existing + add new unique ones
+            existing_aliases = set()
+            try:
+                existing_aliases = set(_json.loads(existing.aliases or "[]"))
+            except (_json.JSONDecodeError, TypeError):
+                pass
+            new_alias_set = set(entry.get("aliases", []))
+            merged_aliases = list(existing_aliases | new_alias_set)
+
+            existing.aliases = _json.dumps(merged_aliases)
+            existing.reference_ranges = new_ranges
+            existing.unit_conversions = new_conversions
+            existing.category = entry.get("category") or existing.category
+            existing.unit = entry.get("unit") or existing.unit
+            existing.data_type = entry.get("data_type", existing.data_type)
+            existing.description = entry.get("description") or existing.description
+            updated += 1
+        else:
+            definition = MetricDefinition(
+                name=name,
+                category=entry.get("category"),
+                unit=entry.get("unit"),
+                data_type=entry.get("data_type", "float"),
+                description=entry.get("description"),
+                aliases=new_aliases,
+                reference_ranges=new_ranges,
+                unit_conversions=new_conversions,
+            )
+            db.add(definition)
+            created += 1
+
+    await db.commit()
+
+    # Invalidate normalizer cache and run normalization
+    from ..services.metric_normalizer import metric_normalizer
+    metric_normalizer._loaded = False
+    await metric_normalizer.load(db)
+    normalized = await metric_normalizer.retroactive_normalize(db)
+
+    logger.info(f"Library refresh: {created} created, {updated} updated, {skipped} skipped, {normalized} metrics normalized")
+    return {
+        "message": f"Library refreshed: {created} created, {updated} updated. Normalized {normalized} metrics.",
+        "created": created,
+        "updated": updated,
+        "skipped": skipped,
+        "normalized": normalized,
+    }

@@ -16,8 +16,9 @@ cd /app/frontend
 npm run dev &
 
 # Start uvicorn with hot-reload in the foreground
-# Only watch Python source dirs — NOT the whole /app (which includes frontend/node_modules)
-cd /
+# Run from /app (not /) so the watcher doesn't scan the entire filesystem tree.
+# Use --reload-exclude to skip frontend/node_modules/.next even if they're in the tree.
+cd /app
 exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload \
     --reload-dir /app/routers \
     --reload-dir /app/services \
@@ -25,4 +26,7 @@ exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload \
     --reload-dir /app/schemas \
     --reload-dir /app/main.py \
     --reload-dir /app/config.py \
-    --reload-dir /app/database.py
+    --reload-dir /app/database.py \
+    --reload-dir /app/data \
+    --reload-exclude "frontend/node_modules" \
+    --reload-exclude "frontend/.next"

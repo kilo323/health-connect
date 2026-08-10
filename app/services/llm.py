@@ -31,8 +31,12 @@ EXTRACTION RULES — follow these precisely:
 2. Values should be numeric whenever possible. If a value cannot be parsed as a number (e.g. "Positive", "<0.1", "Critical"), store it as a string and add a note explaining why.
 3. Include the reference/normal range whenever the document provides one.
 4. For result flags (H, L, HH, LL, A, abnormal, etc.), record the flag in the notes field and set is_important to true.
-5. Use concise, consistent metric names (e.g. "Weight", "BMI", "Body Fat Percentage", "Bone Mass", "Body Water", "Basal Metabolic Rate"). Include the body region in segmental metrics (e.g. "Right Arm Fat", "Trunk Muscle").
+5. Use concise, consistent metric names (e.g. "Weight", "BMI", "Body Fat Percentage", "Bone Mass", "Body Water", "Basal Metabolic Rate"). Include the body region in segmental metrics (e.g. "Right Arm Fat", "Trunk Muscle").6. When a test matches one of the known metric names below, use that exact name. If a test does not match any known name, use the exact name from the document.
 
+KNOWN METRIC NAMES — use these when they match the test being reported:
+```
+{metric_names}
+```
 is_important RULE: Set is_important to true ONLY when the value is outside the reference range, flagged as abnormal/high/low/critical by the lab, or represents a clinically significant finding. Set to false when the value is within normal range or not flagged.
 
 FOR BODY COMPOSITION / DEXA / INBODY REPORTS, extract ALL of the following (if present):
@@ -123,6 +127,11 @@ class LLMService:
         # Load prompt template from file on every call (no caching)
         template = load_prompt_template()
 
+        # Inject canonical metric names for normalization guidance
+        from .metric_normalizer import metric_normalizer
+        canonical_names = metric_normalizer.get_canonical_names()
+        names_json = json.dumps(canonical_names)  # '["Weight", "BMI", ...]'
+
         base_url = config.get("base_url", "").rstrip("/")
         api_key = config.get("api_key", "")
         model = config.get("model", "gpt-4")
@@ -149,10 +158,12 @@ class LLMService:
                 })
             # Add the text prompt
             prompt_text = template.replace("{document_content}", "See attached image(s)")
+            prompt_text = prompt_text.replace("{metric_names}", names_json)
             content_parts.append({"type": "text", "text": prompt_text})
             user_message = {"role": "user", "content": content_parts}
         else:
             prompt = template.replace("{document_content}", document_content[:16000])
+            prompt = prompt.replace("{metric_names}", names_json)
             user_message = {"role": "user", "content": prompt}
 
         async with httpx.AsyncClient(timeout=300.0) as client:

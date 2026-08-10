@@ -1057,6 +1057,10 @@ async def approve_analysis(
     source_doc = source_doc_result.scalar_one_or_none()
     source_filename = source_doc.filename if source_doc else None
 
+    # Load metric normalizer for name/unit/reference normalization
+    from ..services.metric_normalizer import metric_normalizer
+    await metric_normalizer.load(db)
+
     for finding in findings:
         try:
             value_str = str(finding.get("value", "")).strip()
@@ -1067,13 +1071,26 @@ async def approve_analysis(
             continue
 
         metric_name = finding.get("metric_name", "unknown")
+        llm_unit = finding.get("unit") or ""
+        llm_ref_range = finding.get("reference_range") or ""
+
+        # Normalize the metric name and unit via the normalizer
+        normalized = await metric_normalizer.normalize(db, metric_name, llm_unit, llm_ref_range)
+
+        # Use canonical name if matched, otherwise keep original
+        canonical_name = normalized.canonical_name
+        canonical_unit = normalized.normalized_unit
+        definition_id = normalized.definition.id if normalized.definition else None
+
         # Check if this metric already exists for this date (use first() to handle multiple matches)
         day_start = datetime.combine(recorded_date, datetime.min.time()).replace(tzinfo=timezone.utc)
         day_end = datetime.combine(recorded_date, datetime.max.time()).replace(tzinfo=timezone.utc)
+
+        # Check for duplicates using the canonical name
         existing = await db.execute(
             select(HealthMetric).where(
                 HealthMetric.user_id == current_user.id,
-                HealthMetric.metric_type == metric_name,
+                HealthMetric.metric_type == canonical_name,
                 HealthMetric.source == "document_analysis",
                 HealthMetric.recorded_at >= day_start,
                 HealthMetric.recorded_at <= day_end,
@@ -1084,12 +1101,14 @@ async def approve_analysis(
 
         metric = HealthMetric(
             user_id=current_user.id,
-            metric_type=metric_name,
+            metric_type=canonical_name,
             value=value,
-            unit=finding.get("unit") or "",
+            unit=canonical_unit,
             recorded_at=recorded_at,
             source="document_analysis",
             source_document=source_filename,
+            definition_id=definition_id,
+            reference_range=llm_ref_range if llm_ref_range else None,
         )
         db.add(metric)
         imported += 1
@@ -1503,6 +1522,12 @@ async def list_pending_analysis(
     )
     analyses = result.scalars().all()
 
+    # Pre-load normalizer once for match-status checking
+    from ..services.metric_normalizer import metric_normalizer
+    has_pending = any(pa.status in ("pending_review", "analyzed_pending_review") for pa in analyses)
+    if has_pending:
+        await metric_normalizer.load(db)
+
     output = []
     for pa in analyses:
         # Get document filename
@@ -1520,6 +1545,24 @@ async def list_pending_analysis(
         except (json.JSONDecodeError, TypeError):
             pass
 
+        metrics_out = []
+        for f in findings:
+            entry = {
+                "name": f.get("metric_name", ""),
+                "value": f.get("value", ""),
+                "unit": f.get("unit", ""),
+                "reference_range": f.get("reference_range", ""),
+                "is_selected": True,
+                "match_status": "none",
+            }
+            # Add match status if analysis is still pending
+            if pa.status in ("pending_review", "analyzed_pending_review"):
+                normalized = await metric_normalizer.normalize(
+                    db, f.get("metric_name", ""), f.get("unit", "")
+                )
+                entry["match_status"] = normalized.match_type
+            metrics_out.append(entry)
+
         output.append({
             "id": pa.id,
             "document_id": pa.document_id,
@@ -1527,10 +1570,7 @@ async def list_pending_analysis(
             "status": pa.status,
             "analysis_summary": summary,
             "test_date": pa.test_date.isoformat() if pa.test_date else None,
-            "metrics_extracted": [
-                {"name": f.get("metric_name", ""), "value": f.get("value", ""), "unit": f.get("unit", ""), "is_selected": True}
-                for f in findings
-            ],
+            "metrics_extracted": metrics_out,
             "created_at": pa.created_at,
         })
 

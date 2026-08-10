@@ -15,7 +15,8 @@ import {
   Bot,
   Users,
   LinkIcon,
-  BarChart3
+  BarChart3,
+  TestTube2
 } from 'lucide-react';
 
 const navigation = [
@@ -32,6 +33,7 @@ const adminNavigation = [
   { name: 'Google OAuth', href: '/admin/google-oauth', icon: LinkIcon },
   { name: 'LLM Config', href: '/admin/llm-config', icon: Bot },
   { name: 'Schedule', href: '/admin/schedule', icon: Database },
+  { name: 'Metric Definitions', href: '/admin/metric-definitions', icon: TestTube2 },
 ];
 
 export default function Sidebar() {

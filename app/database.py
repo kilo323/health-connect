@@ -37,3 +37,28 @@ async def init_db():
             await conn.execute(text("ALTER TABLE health_metrics ADD COLUMN source_document VARCHAR(255)"))
         except Exception:
             pass  # Column already exists
+        # Add definition_id column to health_metrics (metric normalization)
+        try:
+            await conn.execute(text("ALTER TABLE health_metrics ADD COLUMN definition_id INTEGER REFERENCES metric_definitions(id)"))
+        except Exception:
+            pass  # Column already exists
+        # Add reference_range column to health_metrics
+        try:
+            await conn.execute(text("ALTER TABLE health_metrics ADD COLUMN reference_range VARCHAR(200)"))
+        except Exception:
+            pass  # Column already exists
+        # Add aliases column to metric_definitions
+        try:
+            await conn.execute(text("ALTER TABLE metric_definitions ADD COLUMN aliases TEXT"))
+        except Exception:
+            pass  # Column already exists
+        # Add reference_ranges column to metric_definitions
+        try:
+            await conn.execute(text("ALTER TABLE metric_definitions ADD COLUMN reference_ranges TEXT"))
+        except Exception:
+            pass  # Column already exists
+        # Add unit_conversions column to metric_definitions
+        try:
+            await conn.execute(text("ALTER TABLE metric_definitions ADD COLUMN unit_conversions TEXT"))
+        except Exception:
+            pass  # Column already exists

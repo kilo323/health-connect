@@ -1,6 +1,7 @@
-from pydantic import BaseModel
-from typing import Optional, List
+from pydantic import BaseModel, field_validator
+from typing import Optional, List, Dict
 from datetime import datetime
+import json
 
 
 class HealthMetricCreate(BaseModel):
@@ -20,6 +21,8 @@ class HealthMetricResponse(BaseModel):
     recorded_at: datetime
     source: str
     source_document: Optional[str] = None
+    definition_id: Optional[int] = None
+    reference_range: Optional[str] = None
     created_at: datetime
 
     class Config:
@@ -44,12 +47,26 @@ class SyncConfigResponse(BaseModel):
         from_attributes = True
 
 
+class ReferenceRange(BaseModel):
+    sex: Optional[str] = None  # "male", "female", or None for both
+    age_min: Optional[int] = None
+    age_max: Optional[int] = None
+    low: Optional[float] = None
+    high: Optional[float] = None
+    operator: Optional[str] = None  # "<", ">", "<=", ">=" for single-bound ranges
+    unit: Optional[str] = None
+    source: Optional[str] = None  # e.g. "mayo", "quest", "manual"
+
+
 class MetricDefinitionCreate(BaseModel):
     name: str
     category: Optional[str] = None
     unit: Optional[str] = None
     data_type: str = "float"
     description: Optional[str] = None
+    aliases: Optional[List[str]] = []
+    reference_ranges: Optional[List[ReferenceRange]] = []
+    unit_conversions: Optional[dict] = {}  # {"unit_name": multiplier_to_canonical}
 
 
 class MetricDefinitionResponse(BaseModel):
@@ -59,9 +76,56 @@ class MetricDefinitionResponse(BaseModel):
     unit: Optional[str]
     data_type: str
     description: Optional[str]
+    aliases: Optional[List[str]] = []
+    reference_ranges: Optional[List[ReferenceRange]] = []
+    unit_conversions: Optional[dict] = {}
 
     class Config:
         from_attributes = True
+
+    @field_validator("aliases", mode="before")
+    @classmethod
+    def parse_aliases(cls, v):
+        if v is None or v == "":
+            return []
+        if isinstance(v, str):
+            try:
+                return json.loads(v)
+            except (json.JSONDecodeError, TypeError):
+                return []
+        return v
+
+    @field_validator("reference_ranges", mode="before")
+    @classmethod
+    def parse_reference_ranges(cls, v):
+        if v is None or v == "":
+            return []
+        if isinstance(v, str):
+            try:
+                return json.loads(v)
+            except (json.JSONDecodeError, TypeError):
+                return []
+        return v
+
+    @field_validator("unit_conversions", mode="before")
+    @classmethod
+    def parse_unit_conversions(cls, v):
+        if v is None or v == "":
+            return {}
+        if isinstance(v, str):
+            try:
+                return json.loads(v)
+            except (json.JSONDecodeError, TypeError):
+                return {}
+        return v
+
+
+class UnmatchedMetric(BaseModel):
+    metric_type: str
+    count: int
+    latest_value: Optional[str] = None
+    latest_unit: Optional[str] = None
+    documents: List[str] = []
 
 
 class DocumentCreate(BaseModel):
