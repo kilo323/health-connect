@@ -31,89 +31,34 @@ router = APIRouter(prefix="/health", tags=["Health Data"])
 logger = logging.getLogger(__name__)
 
 
-def _resolve_tesseract_cmd() -> str | None:
-    """Resolve the Tesseract binary path, or None if not available.
+def _extract_document_content(document: "Document") -> tuple[str, str | list[str]]:
+    """Extract content from a document for LLM analysis.
 
-    Priority: OCR_TESSERACT_CMD env var > PATH lookup > common Windows install dirs.
+    Returns:
+        ("text", content_string) for text-based documents (PDFs with embedded text,
+         text/csv/json/xml files, etc.)
+        ("images", [base64_str, ...]) for image-based documents (scanned PDFs,
+         image files) to be sent to the LLM's vision endpoint.
     """
-    import shutil
-    env = os.environ.get("OCR_TESSERACT_CMD")
-    if env and os.path.isfile(env):
-        return env
-    # Already on PATH?
-    on_path = shutil.which("tesseract")
-    if on_path:
-        return on_path
-    for candidate in (
-        r"C:\Program Files\Tesseract-OCR\tesseract.exe",
-        r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
-    ):
-        if os.path.isfile(candidate):
-            return candidate
-    return None
+    import base64
 
-
-# EasyOCR reader is expensive to construct (loads models); cache one per process.
-_easyocr_reader = None
-
-
-def _get_easyocr_reader():
-    """Return a cached EasyOCR reader, or None if EasyOCR is unavailable."""
-    global _easyocr_reader
-    if _easyocr_reader is not None:
-        return _easyocr_reader
-    try:
-        import easyocr
-        # English by default; add more languages via OCR_LANGS env (comma-separated).
-        langs = [l.strip() for l in os.environ.get("OCR_LANGS", "en").split(",") if l.strip()]
-        _easyocr_reader = easyocr.Reader(langs, verbose=False)
-        logger.info("EasyOCR reader initialized")
-    except Exception as e:
-        logger.info(f"EasyOCR not available: {e}")
-        _easyocr_reader = False  # mark as attempted so we don't retry each call
-    return _easyocr_reader or None
-
-
-def _ocr_image(img) -> str:
-    """Run OCR on a PIL.Image, trying Tesseract first then EasyOCR."""
-    tesseract_cmd = _resolve_tesseract_cmd()
-    if tesseract_cmd:
-        try:
-            import pytesseract
-            pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
-            return pytesseract.image_to_string(img)
-        except Exception as e:
-            logger.warning(f"Tesseract OCR failed: {e}")
-    reader = _get_easyocr_reader()
-    if reader:
-        try:
-            import numpy as np
-            results = reader.readtext(np.array(img), detail=0, paragraph=True)
-            return "\n".join(results)
-        except Exception as e:
-            logger.warning(f"EasyOCR failed: {e}")
-    logger.warning("No OCR backend available (Tesseract not installed and EasyOCR unavailable)")
-    return ""
-
-
-def _extract_document_text(document: "Document") -> str:
-    """Extract text content from a document, with multiple fallback strategies."""
-    content = ""
     try:
         if document.file_type in ('text', 'csv', 'json', 'xml'):
             with open(document.file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                content = f.read()
+                return ("text", f.read())
+
         elif document.file_type == 'pdf':
             # Strategy 1: pdfplumber (best for text-based PDFs)
+            text_content = ""
             try:
                 import pdfplumber
                 with pdfplumber.open(document.file_path) as pdf:
-                    content = "\n".join(page.extract_text() or "" for page in pdf.pages)
+                    text_content = "\n".join(page.extract_text() or "" for page in pdf.pages)
             except Exception:
                 pass
 
             # Strategy 2: PyMuPDF text extraction (handles some scanned PDFs better)
-            if not content or not content.strip():
+            if not text_content or not text_content.strip():
                 logger.info(f"pdfplumber got no text from {document.filename}, trying PyMuPDF...")
                 try:
                     import pymupdf
@@ -121,41 +66,49 @@ def _extract_document_text(document: "Document") -> str:
                     pymupdf_pages = []
                     for page in doc:
                         pymupdf_pages.append(page.get_text())
-                    content = "\n".join(pymupdf_pages)
+                    text_content = "\n".join(pymupdf_pages)
                     doc.close()
                 except Exception as e:
                     logger.warning(f"PyMuPDF text extraction failed for {document.filename}: {e}")
 
-            # Strategy 3: OCR via PyMuPDF rendering (for true scanned PDFs)
-            if not content or not content.strip():
-                logger.info(f"No text from PyMuPDF for {document.filename}, trying OCR...")
-                try:
-                    import pymupdf
-                    from PIL import Image
-                    doc = pymupdf.open(document.file_path)
-                    ocr_pages = []
-                    for page in doc:
-                        pix = page.get_pixmap(dpi=200)
-                        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-                        ocr_pages.append(_ocr_image(img))
-                    content = "\n".join(ocr_pages)
-                    doc.close()
-                except Exception as e:
-                    logger.warning(f"OCR failed for {document.filename}: {e}")
+            # If we got text, return it directly
+            if text_content and text_content.strip():
+                return ("text", text_content)
+
+            # Strategy 3: Render scanned PDF pages as images for LLM vision
+            logger.info(f"No embedded text in {document.filename}, rendering pages as images for LLM vision...")
+            try:
+                import pymupdf
+                doc = pymupdf.open(document.file_path)
+                page_images = []
+                for page in doc:
+                    pix = page.get_pixmap(dpi=200)
+                    img_bytes = pix.tobytes("png")
+                    page_images.append(base64.b64encode(img_bytes).decode("utf-8"))
+                doc.close()
+                if page_images:
+                    return ("images", page_images)
+            except Exception as e:
+                logger.warning(f"Failed to render PDF pages as images for {document.filename}: {e}")
+
+            return ("text", "")
 
         elif document.file_type == 'image':
             try:
-                from PIL import Image
-                img = Image.open(document.file_path)
-                content = _ocr_image(img)
+                with open(document.file_path, "rb") as f:
+                    img_bytes = f.read()
+                return ("images", [base64.b64encode(img_bytes).decode("utf-8")])
             except Exception as e:
-                logger.warning(f"Image OCR failed for {document.filename}: {e}")
+                logger.warning(f"Failed to read image {document.filename}: {e}")
+                return ("text", "")
+
         else:
             with open(document.file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                content = f.read()
+                return ("text", f.read())
+
     except Exception as e:
-        logger.warning(f"Failed to extract text from {document.filename}: {e}")
-    return content or ""
+        logger.warning(f"Failed to extract content from {document.filename}: {e}")
+        return ("text", "")
 
 
 @router.get("/metrics", response_model=List[HealthMetricResponse])
@@ -1198,16 +1151,19 @@ async def analyze_document(
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
     
-    # Read file content using shared helper (handles scanned PDFs with OCR)
-    content = _extract_document_text(document)
-    
-    if not content or not content.strip():
+    # Read file content — text extraction or image rendering for LLM vision
+    doc_type, content = _extract_document_content(document)
+
+    if doc_type == "text" and (not content or not content.strip()):
         raise HTTPException(status_code=400, detail="Document appears to be empty or unreadable")
-    
+
     # Analyze with LLM
     llm_service = LLMService()
     try:
-        analysis_result = await llm_service.analyze_document(current_user.id, content)
+        if doc_type == "images":
+            analysis_result = await llm_service.analyze_document(current_user.id, image_content=content)
+        else:
+            analysis_result = await llm_service.analyze_document(current_user.id, document_content=content)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"LLM analysis failed: {str(e)}")
     
@@ -1310,10 +1266,10 @@ async def _run_batch_analysis(job_id: int, user_id: int):
                     })
 
                 try:
-                    # Read file content using shared helper (handles scanned PDFs with OCR)
-                    content = _extract_document_text(document)
+                    # Read file content — text extraction or image rendering for LLM vision
+                    doc_type, content = _extract_document_content(document)
 
-                    if not content or not content.strip():
+                    if doc_type == "text" and (not content or not content.strip()):
                         error_details.append({"filename": document.filename, "error": "empty or unreadable"})
                         job.errors += 1
                         job.processed += 1
@@ -1321,7 +1277,10 @@ async def _run_batch_analysis(job_id: int, user_id: int):
                         continue
 
                     # Analyze with LLM
-                    analysis_result = await llm_service.analyze_document(user_id, content)
+                    if doc_type == "images":
+                        analysis_result = await llm_service.analyze_document(user_id, image_content=content)
+                    else:
+                        analysis_result = await llm_service.analyze_document(user_id, document_content=content)
 
                     # Parse test_date
                     test_date = None

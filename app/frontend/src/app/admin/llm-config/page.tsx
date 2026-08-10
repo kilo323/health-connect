@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import AuthLayout from '@/components/AuthLayout';
-import { Bot, Save, Loader2, CheckCircle, AlertCircle, RefreshCw } from 'lucide-react';
+import { Bot, Save, Loader2, CheckCircle, AlertCircle, RefreshCw, FileText, RotateCcw } from 'lucide-react';
 import apiClient from '@/lib/api-client';
 
 interface LLMConfig {
@@ -25,8 +25,17 @@ export default function AdminLLMConfigPage() {
   const [modelsError, setModelsError] = useState<string | null>(null);
   const [customModelInput, setCustomModelInput] = useState('');
 
+  // Prompt editor state
+  const [promptContent, setPromptContent] = useState('');
+  const [promptLoading, setPromptLoading] = useState(true);
+  const [promptSaving, setPromptSaving] = useState(false);
+  const [promptSaved, setPromptSaved] = useState(false);
+  const [promptError, setPromptError] = useState<string | null>(null);
+  const [promptPath, setPromptPath] = useState('');
+
   useEffect(() => {
     loadConfig();
+    loadPrompt();
   }, []);
 
   const loadConfig = async () => {
@@ -37,6 +46,53 @@ export default function AdminLLMConfigPage() {
       console.error('Failed to load LLM config:', error);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const loadPrompt = async () => {
+    setPromptLoading(true);
+    setPromptError(null);
+    try {
+      const res = await apiClient.get('/admin/settings/llm-prompt');
+      setPromptContent(res.data.content || '');
+      setPromptPath(res.data.path || '');
+    } catch (error) {
+      console.error('Failed to load prompt:', error);
+      setPromptError('Failed to load prompt template');
+    } finally {
+      setPromptLoading(false);
+    }
+  };
+
+  const savePrompt = async () => {
+    setPromptSaving(true);
+    setPromptError(null);
+    try {
+      await apiClient.put('/admin/settings/llm-prompt', { content: promptContent });
+      setPromptSaved(true);
+      setTimeout(() => setPromptSaved(false), 3000);
+    } catch (error) {
+      console.error('Failed to save prompt:', error);
+      setPromptError('Failed to save prompt template');
+    } finally {
+      setPromptSaving(false);
+    }
+  };
+
+  const resetPrompt = async () => {
+    if (!confirm('Reset the prompt to the built-in default? Your customizations will be lost.')) return;
+    setPromptSaving(true);
+    setPromptError(null);
+    try {
+      const res = await apiClient.post('/admin/settings/llm-prompt/reset');
+      setPromptContent(res.data.content || '');
+      setPromptSaved(true);
+      setTimeout(() => setPromptSaved(false), 3000);
+    } catch (error) {
+      console.error('Failed to reset prompt:', error);
+      setPromptError('Failed to reset prompt template');
+    } finally {
+      setPromptSaving(false);
     }
   };
 
@@ -218,6 +274,91 @@ export default function AdminLLMConfigPage() {
           <p className="text-sm text-gray-700">
             This configuration is used for analyzing uploaded health documents. 
             Make sure the API endpoint supports chat completions with JSON output.
+          </p>
+          <p className="text-sm text-blue-700 mt-2 font-medium">
+            ℹ️ The selected model must support <strong>vision</strong> (image input) to extract text from scanned PDFs and image uploads.
+            Text-based PDFs and plain text files work with any model.
+          </p>
+        </div>
+      </div>
+
+      {/* Prompt Editor Section */}
+      <div className="card max-w-4xl mt-8">
+        <div className="flex items-center gap-3 mb-6">
+          <FileText className="h-8 w-8 text-purple-600" />
+          <div>
+            <h2 className="text-lg font-semibold text-gray-900">Analysis Prompt Template</h2>
+            <p className="text-sm text-gray-500">
+              Customize the prompt sent to the LLM when analyzing documents.
+              Use <code className="bg-gray-100 px-1 rounded text-xs">{'{document_content}'}</code> as a placeholder for the extracted document text.
+            </p>
+          </div>
+        </div>
+
+        {promptSaved && (
+          <div className="bg-green-50 border border-green-200 rounded-lg p-3 mb-4 flex items-center gap-2">
+            <CheckCircle className="h-4 w-4 text-green-600" />
+            <span className="text-sm text-green-700">Prompt saved successfully</span>
+          </div>
+        )}
+
+        {promptError && (
+          <div className="bg-red-50 border border-red-200 rounded-lg p-3 mb-4 flex items-center gap-2">
+            <AlertCircle className="h-4 w-4 text-red-600" />
+            <span className="text-sm text-red-700">{promptError}</span>
+          </div>
+        )}
+
+        {promptPath && (
+          <p className="text-xs text-gray-400 mb-3 font-mono">File: {promptPath}</p>
+        )}
+
+        {promptLoading ? (
+          <div className="flex items-center gap-2 py-8 text-gray-500">
+            <Loader2 className="h-4 w-4 animate-spin" /> Loading prompt...
+          </div>
+        ) : (
+          <>
+            <textarea
+              value={promptContent}
+              onChange={(e) => setPromptContent(e.target.value)}
+              rows={20}
+              className="input-field font-mono text-sm w-full resize-y"
+              spellCheck={false}
+            />
+            <div className="flex items-center gap-3 mt-4">
+              <button
+                onClick={savePrompt}
+                disabled={promptSaving}
+                className="btn-primary flex items-center gap-2"
+              >
+                {promptSaving && <Loader2 className="h-4 w-4 animate-spin" />}
+                <Save className="h-4 w-4" /> Save Prompt
+              </button>
+              <button
+                onClick={loadPrompt}
+                disabled={promptLoading}
+                className="btn-secondary flex items-center gap-2"
+              >
+                <RefreshCw className="h-4 w-4" /> Reload from Disk
+              </button>
+              <button
+                onClick={resetPrompt}
+                disabled={promptSaving}
+                className="btn-secondary flex items-center gap-2 text-red-600 hover:text-red-700"
+              >
+                <RotateCcw className="h-4 w-4" /> Reset to Default
+              </button>
+            </div>
+          </>
+        )}
+
+        <div className="mt-4 p-4 bg-gray-50 rounded-lg">
+          <AlertCircle className="h-4 w-4 text-yellow-600 mb-2" />
+          <p className="text-sm text-gray-700">
+            Changes take effect immediately — the prompt is loaded from disk on every analysis request (no caching).
+            Make sure to include <code className="bg-gray-100 px-1 rounded text-xs">{'{document_content}'}</code> in your prompt, 
+            otherwise the document text won't be injected.
           </p>
         </div>
       </div>

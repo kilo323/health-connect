@@ -1,6 +1,8 @@
 # local dev
 uploads/
 data/
+00-sample-docs/
+certs/
 
 # Python / Backend
 .venv/

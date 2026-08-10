@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from pydantic import BaseModel
 import logging
+import os
 
 from ..database import get_db
 from ..models.settings import AppSettings, ScheduleConfig
@@ -51,7 +52,11 @@ async def get_llm_config(
     config = result.scalar_one_or_none()
     
     if not config:
-        return LLMConfig(base_url="", api_key="", model="gpt-4")
+        return LLMConfig(
+            base_url=os.getenv("LLM_URL", ""),
+            api_key=os.getenv("LLM_API_TOKEN", ""),
+            model=os.getenv("LLM_MODEL", "gpt-4"),
+        )
     
     import json
     try:
@@ -294,3 +299,54 @@ async def update_google_oauth_config(
     await db.commit()
     logger.info("Google OAuth configuration updated")
     return {"message": "Google OAuth configuration updated successfully"}
+
+
+# ---------------------------------------------------------------------------
+# LLM Prompt management
+# ---------------------------------------------------------------------------
+
+class PromptPayload(BaseModel):
+    """Request body for saving the LLM prompt."""
+    content: str
+
+
+@router.get("/settings/llm-prompt")
+async def get_llm_prompt(
+    current_user: UserResponse = Depends(get_current_user),
+):
+    """Get the current LLM prompt template content."""
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    from ..services.llm import load_prompt_template, get_prompt_file_path
+    content = load_prompt_template()
+    return {"content": content, "path": str(get_prompt_file_path())}
+
+
+@router.put("/settings/llm-prompt")
+async def update_llm_prompt(
+    payload: PromptPayload,
+    current_user: UserResponse = Depends(get_current_user),
+):
+    """Save the LLM prompt template to disk."""
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    from ..services.llm import save_prompt_template
+    save_prompt_template(payload.content)
+    logger.info("LLM prompt template updated")
+    return {"message": "Prompt saved successfully"}
+
+
+@router.post("/settings/llm-prompt/reset")
+async def reset_llm_prompt(
+    current_user: UserResponse = Depends(get_current_user),
+):
+    """Reset the LLM prompt to the built-in default."""
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    from ..services.llm import _DEFAULT_PROMPT, save_prompt_template
+    save_prompt_template(_DEFAULT_PROMPT)
+    logger.info("LLM prompt template reset to default")
+    return {"message": "Prompt reset to default", "content": _DEFAULT_PROMPT}

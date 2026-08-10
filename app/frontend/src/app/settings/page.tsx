@@ -1,25 +1,20 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect } from 'react';
 import AuthLayout from '@/components/AuthLayout';
-import { Settings, Link as LinkIcon, Cloud, Bot, Database, CheckCircle, Loader2, AlertCircle, RefreshCw, Clock, Play } from 'lucide-react';
+import { Link as LinkIcon, Cloud, CheckCircle, Loader2, AlertCircle, RefreshCw } from 'lucide-react';
 import FolderPicker from '@/components/FolderPicker';
 import apiClient from '@/lib/api-client';
 
 export default function SettingsPage() {
-  const [activeTab, setActiveTab] = useState<'google' | 'nextcloud' | 'llm' | 'sync'>('google');
+  const [activeTab, setActiveTab] = useState<'google' | 'nextcloud' | 'sync'>('google');
 
   // Google Health Connect state
   const [googleConnected, setGoogleConnected] = useState(false);
   const [googleLoading, setGoogleLoading] = useState(false);
   const [error, setError] = useState('');
-  const [googleClientId, setGoogleClientId] = useState('');
-  const [googleClientSecret, setGoogleClientSecret] = useState('');
-  const [googleRedirectUri, setGoogleRedirectUri] = useState('');
   const [googleConfigured, setGoogleConfigured] = useState(false);
-  const [googleConfigLoading, setGoogleConfigLoading] = useState(false);
-  const [googleConfigSaved, setGoogleConfigSaved] = useState(false);
-  const [isAdmin, setIsAdmin] = useState(false);
+  const [disconnecting, setDisconnecting] = useState(false);
 
   // Nextcloud state
   const [nextcloudUrl, setNextcloudUrl] = useState('');
@@ -28,27 +23,6 @@ export default function SettingsPage() {
   const [nextcloudConnected, setNextcloudConnected] = useState(false);
   const [nextcloudLoading, setNextcloudLoading] = useState(false);
   const [nextcloudSyncPath, setNextcloudSyncPath] = useState('/');
-
-  // LLM Config state (admin only)
-  const [llmBaseUrl, setLlmBaseUrl] = useState('');
-  const [llmApiKey, setLlmApiKey] = useState('');
-  const [llmModel, setLlmModel] = useState('');
-  const [llmLoading, setLlmLoading] = useState(false);
-  const [availableModels, setAvailableModels] = useState<string[]>([]);
-  const [fetchingModels, setFetchingModels] = useState(false);
-  const [modelsError, setModelsError] = useState<string | null>(null);
-  const [customModelInput, setCustomModelInput] = useState('');
-  const [configLoaded, setConfigLoaded] = useState(false);
-  const [savedModel, setSavedModel] = useState('');
-
-  // Sync Schedule state (admin only)
-  const [scheduleEnabled, setScheduleEnabled] = useState(false);
-  const [cronExpression, setCronExpression] = useState('0 2 * * *');
-  const [scheduleLoading, setScheduleLoading] = useState(false);
-  const [scheduleSaved, setScheduleSaved] = useState(false);
-  const [syncing, setSyncing] = useState(false);
-  const [syncMessage, setSyncMessage] = useState('');
-  const [disconnecting, setDisconnecting] = useState(false);
 
   // Sync Settings state (per-user)
   const [syncDaysBack, setSyncDaysBack] = useState(7);
@@ -63,143 +37,24 @@ export default function SettingsPage() {
 
   const loadSettings = async () => {
     try {
-      const [googleStatusRes, googleConfigRes, nextcloudRes, whoamiRes, syncSettingsRes] = await Promise.all([
+      const [googleStatusRes, googleConfigRes, nextcloudRes, syncSettingsRes] = await Promise.all([
         apiClient.get('/health/google-health/status').catch(() => ({ data: { is_linked: false } })),
         apiClient.get('/health/google-health/config').catch(() => ({ data: { client_id: '', is_configured: false } })),
         apiClient.get('/health/nextcloud/config').catch(() => ({ data: { server_url: '', username: '', is_configured: false } })),
-        apiClient.get('/users/me').catch(() => ({ data: { role: 'user' } })),
         apiClient.get('/health/sync/settings').catch(() => ({ data: { sync_days_back: 7, last_google_sync: null } })),
       ]);
 
-      const userIsAdmin = whoamiRes.data?.role === 'admin';
-      setIsAdmin(userIsAdmin);
       setGoogleConnected(googleStatusRes.data?.is_linked || false);
       setGoogleConfigured(googleConfigRes.data?.is_configured || false);
       setSyncDaysBack(syncSettingsRes.data?.sync_days_back ?? 7);
       setLastGoogleSync(syncSettingsRes.data?.last_google_sync ?? null);
 
-      // Only admins can see and edit Google OAuth credentials
-      if (userIsAdmin) {
-        try {
-          const adminGoogleRes = await apiClient.get('/admin/settings/google-oauth');
-          setGoogleClientId(adminGoogleRes.data?.client_id || '');
-          setGoogleClientSecret(adminGoogleRes.data?.client_secret || '');
-          setGoogleRedirectUri(adminGoogleRes.data?.redirect_uri || '');
-        } catch { /* not admin or not configured */ }
-
-        // Load sync schedule
-        try {
-          const scheduleRes = await apiClient.get('/admin/settings/schedule');
-          setScheduleEnabled(scheduleRes.data?.is_enabled || false);
-          setCronExpression(scheduleRes.data?.cron_expression || '0 2 * * *');
-        } catch { /* not admin */ }
-      }
       setNextcloudConnected(nextcloudRes.data?.is_configured || false);
       if (nextcloudRes.data?.server_url) setNextcloudUrl(nextcloudRes.data.server_url);
       if (nextcloudRes.data?.username) setNextcloudUsername(nextcloudRes.data.username);
       if (nextcloudRes.data?.sync_path) setNextcloudSyncPath(nextcloudRes.data.sync_path);
-
-      // Load LLM config if admin
-      try {
-        const llmRes = await apiClient.get('/admin/settings/llm');
-        const baseUrl = llmRes.data?.base_url || '';
-        const apiKey = llmRes.data?.api_key || '';
-        const savedModelVal = llmRes.data?.model || '';
-
-        if (baseUrl) setLlmBaseUrl(baseUrl);
-        if (apiKey) setLlmApiKey(apiKey);
-        setSavedModel(savedModelVal);
-        setConfigLoaded(true);
-
-        // Auto-fetch models if we have a configured endpoint
-        if (baseUrl && apiKey) {
-          setFetchingModels(true);
-          try {
-            const modelsRes = await apiClient.get('/admin/llm/models', {
-              params: { base_url: baseUrl, api_key: apiKey }
-            });
-            const models: string[] = modelsRes.data?.models || [];
-            setAvailableModels(models);
-
-            if (modelsRes.data?.error) {
-              setModelsError(modelsRes.data.error);
-            }
-
-            // Set models and selected model in one state update so they render together
-            const selectedModel = (savedModelVal && models.includes(savedModelVal)) ? savedModelVal : '';
-            const customInput = (savedModelVal && !models.includes(savedModelVal)) ? savedModelVal : '';
-            setAvailableModels(models);
-            setLlmModel(selectedModel);
-            setCustomModelInput(customInput);
-          } catch {
-            setModelsError('Failed to fetch models from endpoint');
-          } finally {
-            setFetchingModels(false);
-          }
-        }
-      } catch { /* not admin */ }
     } catch (error) {
       console.error('Failed to load settings:', error);
-    }
-  };
-
-  const fetchModels = useCallback(async () => {
-    if (!llmBaseUrl || !llmApiKey) {
-      setModelsError('Please enter API Base URL and API Key first');
-      return;
-    }
-
-    setFetchingModels(true);
-    setModelsError(null);
-
-    try {
-      const res = await apiClient.get('/admin/llm/models', {
-        params: { base_url: llmBaseUrl, api_key: llmApiKey }
-      });
-
-      if (res.data.error) {
-        setModelsError(res.data.error);
-        setAvailableModels([]);
-      } else {
-        const models = res.data.models || [];
-        setAvailableModels(models);
-        setModelsError(null);
-
-        // Re-select saved model if available, otherwise use custom input
-        if (llmModel && models.includes(llmModel)) {
-          setCustomModelInput('');
-        } else if (customModelInput && models.includes(customModelInput)) {
-          setLlmModel(customModelInput);
-          setCustomModelInput('');
-        } else {
-          setLlmModel('');
-        }
-      }
-    } catch (error) {
-      console.error('Failed to fetch models:', error);
-      setModelsError('Failed to fetch models from endpoint');
-      setAvailableModels([]);
-    } finally {
-      setFetchingModels(false);
-    }
-  }, [llmBaseUrl, llmApiKey, llmModel, customModelInput]);
-
-  const handleGoogleConfigSave = async () => {
-    if (!googleClientId || !googleClientSecret) return;
-    setGoogleConfigLoading(true);
-    try {
-      await apiClient.put('/admin/settings/google-oauth', {
-        client_id: googleClientId,
-        client_secret: googleClientSecret,
-        redirect_uri: googleRedirectUri,
-      });
-      setGoogleConfigured(true);
-      setGoogleConfigSaved(true);
-      setTimeout(() => setGoogleConfigSaved(false), 3000);
-    } catch (error) {
-      console.error('Failed to save Google config:', error);
-    } finally {
-      setGoogleConfigLoading(false);
     }
   };
 
@@ -214,42 +69,12 @@ export default function SettingsPage() {
     } catch (error: any) {
       const detail = error.response?.data?.detail;
       if (detail?.includes('not configured')) {
-        setError('Google Health Connect is not configured. Please set up OAuth credentials first.');
+        setError('Google Health Connect is not configured. Please ask an admin to set up OAuth credentials.');
       } else {
         console.error('Failed to get OAuth URL:', error);
       }
     } finally {
       setGoogleLoading(false);
-    }
-  };
-
-  const handleScheduleSave = async () => {
-    setScheduleLoading(true);
-    try {
-      await apiClient.put('/admin/settings/schedule', {
-        is_enabled: scheduleEnabled,
-        cron_expression: cronExpression,
-      });
-      setScheduleSaved(true);
-      setTimeout(() => setScheduleSaved(false), 3000);
-    } catch (error) {
-      console.error('Failed to save schedule:', error);
-    } finally {
-      setScheduleLoading(false);
-    }
-  };
-
-  const handleSyncNow = async () => {
-    setSyncing(true);
-    setSyncMessage('');
-    try {
-      await apiClient.post('/admin/sync/now');
-      setSyncMessage('Sync started! Data will be fetched from Google Fit and processed.');
-      setTimeout(() => setSyncMessage(''), 5000);
-    } catch (error: any) {
-      setSyncMessage(error.response?.data?.detail || 'Failed to start sync');
-    } finally {
-      setSyncing(false);
     }
   };
 
@@ -265,13 +90,6 @@ export default function SettingsPage() {
       setDisconnecting(false);
     }
   };
-
-  const cronPresets = [
-    { label: 'Daily at 2 AM', value: '0 2 * * *' },
-    { label: 'Every 6 hours', value: '0 */6 * * *' },
-    { label: 'Weekly Sunday 3 AM', value: '0 3 * * 0' },
-    { label: 'Weekdays midnight', value: '0 0 * * 1-5' },
-  ];
 
   const handleNextcloudSave = async () => {
     if (!nextcloudUrl || !nextcloudUsername || !nextcloudPassword) return;
@@ -302,23 +120,6 @@ export default function SettingsPage() {
       setNextcloudSyncPath('/');
     } catch (error) {
       console.error('Failed to disconnect Nextcloud:', error);
-    }
-  };
-
-  const handleLlmSave = async () => {
-    if (!llmBaseUrl || !llmApiKey) return;
-    
-    setLlmLoading(true);
-    try {
-      await apiClient.put('/admin/settings/llm', {
-        base_url: llmBaseUrl,
-        api_key: llmApiKey,
-        model: llmModel,
-      });
-    } catch (error) {
-      console.error('Failed to save LLM config:', error);
-    } finally {
-      setLlmLoading(false);
     }
   };
 
@@ -388,12 +189,6 @@ export default function SettingsPage() {
             Connect your Google account to sync health and fitness data from Google Fit.
           </p>
 
-          {isAdmin && (
-            <a href="/admin/google-oauth" className="text-sm text-blue-600 hover:text-blue-800 underline mb-4 inline-block">
-              Configure Google OAuth credentials (admin)
-            </a>
-          )}
-
           <div className="border border-gray-200 rounded-lg p-4">
             {googleConnected ? (
               <div className="bg-green-50 border border-green-200 rounded-lg p-4">
@@ -420,7 +215,7 @@ export default function SettingsPage() {
                   <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3 mb-3 flex items-start gap-2">
                     <AlertCircle className="h-4 w-4 text-yellow-600 mt-0.5" />
                     <p className="text-sm text-yellow-700">
-                      {isAdmin ? 'Configure OAuth credentials on the admin Google OAuth page first.' : 'Google OAuth is not configured yet. Ask an admin to set up credentials.'}
+                      Google OAuth is not configured yet. Ask an admin to set up credentials.
                     </p>
                   </div>
                 )}

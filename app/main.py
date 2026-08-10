@@ -68,6 +68,38 @@ async def lifespan(app: FastAPI):
                 logger.info("Admin account already exists")
     finally:
         await db.close()
+
+    # Seed LLM configuration from environment variables if no admin config exists yet
+    from .models.settings import AppSettings
+    import json as _json
+
+    if settings.llm_url and settings.llm_api_token:
+        db = async_session_factory()
+        try:
+            result = await db.execute(
+                select(AppSettings).where(AppSettings.key == "llm_config")
+            )
+            existing = result.scalar_one_or_none()
+
+            if not existing:
+                llm_config = _json.dumps({
+                    "base_url": settings.llm_url,
+                    "api_key": settings.llm_api_token,
+                    "model": settings.llm_model,
+                })
+                db.add(AppSettings(
+                    key="llm_config",
+                    value=llm_config,
+                    description="LLM configuration (seeded from environment variables)",
+                ))
+                await db.commit()
+                logger.info("LLM configuration seeded from environment variables")
+            else:
+                logger.info("LLM configuration already exists in database, skipping env seed")
+        finally:
+            await db.close()
+    else:
+        logger.info("LLM_URL / LLM_API_TOKEN not set — skipping LLM config seed")
     
     # Start scheduler if enabled
     try:

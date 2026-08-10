@@ -6,6 +6,9 @@ class Settings(BaseSettings):
     admin_password: str = "changeme"
     database_url: str = "sqlite+aiosqlite:///./data/health_tracker.db"
     fernet_key: str | None = None
+    llm_url: str = ""
+    llm_api_token: str = ""
+    llm_model: str = ""
 
     class Config:
         env_prefix = ""

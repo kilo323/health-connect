@@ -281,8 +281,8 @@ export default function ReportsPage() {
                     <YAxis tick={{ fontSize: 12 }} width={60} />
                     <Tooltip
                       labelFormatter={(v) => new Date(v + 'T00:00:00').toLocaleDateString()}
-                      formatter={(value: number) => [
-                        `${formatValue(value, selectedMetric)} ${formatUnit(chartData[0]?.unit || '', selectedMetric)}`,
+                      formatter={(value) => [
+                        `${formatValue(Number(value), selectedMetric)} ${formatUnit(chartData[0]?.unit || '', selectedMetric)}`,
                         METRIC_LABELS[selectedMetric] || selectedMetric,
                       ]}
                     />

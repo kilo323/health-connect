@@ -9,7 +9,7 @@ interface PendingAnalysis {
   id: number;
   document_id: number;
   filename: string;
-  status: 'pending' | 'analyzing' | 'completed' | 'error';
+  status: 'pending' | 'analyzing' | 'completed' | 'error' | 'approved' | 'rejected' | 'pending_review';
   analysis_summary?: string;
   test_date?: string | null;
   metrics_extracted?: Array<{
