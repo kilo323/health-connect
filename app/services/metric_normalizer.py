@@ -10,6 +10,7 @@ import json
 import logging
 from dataclasses import dataclass
 from difflib import SequenceMatcher
+from pathlib import Path
 from typing import Optional
 
 from sqlalchemy import select
@@ -285,6 +286,108 @@ class MetricNormalizer:
             except (json.JSONDecodeError, TypeError):
                 return []
         return value
+
+
+async def apply_metric_library(db: AsyncSession) -> dict:
+    """Create/update MetricDefinitions from data/metric_library.json.
+
+    Idempotent: matches by exact name, merges aliases, overwrites
+    ranges/conversions. After applying, reloads the normalizer and runs
+    retroactive normalization so existing unlinked metrics get linked.
+
+    Returns a summary dict: {created, updated, skipped, normalized}.
+    Raises FileNotFoundError if the library file cannot be located.
+    """
+    # Locate the library file (repo data/ dir, with Docker fallback)
+    data_dir = Path(__file__).resolve().parent.parent.parent / "data"
+    library_path = data_dir / "metric_library.json"
+    if not library_path.exists():
+        library_path = Path("/app/data/metric_library.json")
+    if not library_path.exists():
+        raise FileNotFoundError("metric_library.json not found")
+
+    from ..config import settings
+    protect = settings.metric_library_protect
+
+    library = json.loads(library_path.read_text(encoding="utf-8"))
+
+    created = 0
+    updated = 0
+    skipped = 0
+    protected = 0
+
+    for entry in library:
+        name = entry.get("name", "").strip()
+        if not name:
+            skipped += 1
+            continue
+
+        is_protected = protect and entry.get("protected") is True
+
+        result = await db.execute(
+            select(MetricDefinition).where(MetricDefinition.name == name)
+        )
+        existing = result.scalar_one_or_none()
+
+        new_aliases = json.dumps(entry.get("aliases", []))
+        new_ranges = json.dumps(entry.get("reference_ranges", []))
+        new_conversions = json.dumps(entry.get("unit_conversions", {}))
+
+        if existing:
+            # Merge aliases — keep existing + add new unique ones (always safe,
+            # even for protected entries, so new name variants still link).
+            existing_aliases = set()
+            try:
+                existing_aliases = set(json.loads(existing.aliases or "[]"))
+            except (json.JSONDecodeError, TypeError):
+                pass
+            merged_aliases = list(existing_aliases | set(entry.get("aliases", [])))
+            existing.aliases = json.dumps(merged_aliases)
+
+            if is_protected:
+                # Protected: leave unit/ranges/conversions/category/description
+                # untouched (aliases above are still merged for linking).
+                protected += 1
+                continue
+
+            existing.reference_ranges = new_ranges
+            existing.unit_conversions = new_conversions
+            existing.category = entry.get("category") or existing.category
+            existing.unit = entry.get("unit") or existing.unit
+            existing.data_type = entry.get("data_type", existing.data_type)
+            existing.description = entry.get("description") or existing.description
+            updated += 1
+        else:
+            db.add(MetricDefinition(
+                name=name,
+                category=entry.get("category"),
+                unit=entry.get("unit"),
+                data_type=entry.get("data_type", "float"),
+                description=entry.get("description"),
+                aliases=new_aliases,
+                reference_ranges=new_ranges,
+                unit_conversions=new_conversions,
+            ))
+            created += 1
+
+    await db.commit()
+
+    # Invalidate the normalizer cache and re-link any unmatched metrics
+    metric_normalizer._loaded = False
+    await metric_normalizer.load(db)
+    normalized = await metric_normalizer.retroactive_normalize(db)
+
+    logger.info(
+        f"Metric library applied: {created} created, {updated} updated, "
+        f"{protected} protected, {skipped} skipped, {normalized} metrics normalized"
+    )
+    return {
+        "created": created,
+        "updated": updated,
+        "skipped": skipped,
+        "protected": protected,
+        "normalized": normalized,
+    }
 
 
 # Singleton instance

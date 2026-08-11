@@ -407,12 +407,14 @@
     "category": "Body Composition",
     "unit": "%",
     "data_type": "float",
+    "protected": true,
     "description": "Percentage of body weight that is fat",
     "aliases": [
       "Body Fat %",
       "Body Fat",
       "Fat %",
-      "Percent Body Fat"
+      "Percent Body Fat",
+      "body_fat_percentage"
     ],
     "reference_ranges": [
       {
@@ -1068,12 +1070,14 @@
     "category": "Metabolic",
     "unit": "mg/dL",
     "data_type": "float",
+    "protected": true,
     "description": "Blood sugar level",
     "aliases": [
       "Glucose, Serum",
       "Blood Glucose",
       "Fasting Glucose",
-      "GLUCOSE"
+      "GLUCOSE",
+      "blood_glucose"
     ],
     "reference_ranges": [
       {
@@ -1124,6 +1128,7 @@
     "category": "Body Composition",
     "unit": "meters",
     "data_type": "float",
+    "protected": true,
     "description": "A measure of a person's stature or vertical length from head to foot while standing erect.",
     "aliases": [
       "height",
@@ -2059,9 +2064,10 @@
   },
   {
     "name": "Steps",
-    "category": "Activity",
+    "category": "Fitness",
     "unit": "count",
     "data_type": "float",
+    "protected": true,
     "description": "Number of steps taken, typically measured over a 24-hour period using a pedometer or accelerometer device.",
     "aliases": [
       "steps",
@@ -2483,16 +2489,18 @@
   {
     "name": "Weight",
     "category": "Body Composition",
-    "unit": "lb",
+    "unit": "kg",
     "data_type": "float",
+    "protected": true,
     "description": "Body weight",
     "aliases": [
       "Body Weight",
-      "Weight (lbs)"
+      "Weight (lbs)",
+      "weight"
     ],
     "reference_ranges": [],
     "unit_conversions": {
-      "kg": 0.453592
+      "lb": 2.20462
     }
   },
   {
@@ -2515,6 +2523,156 @@
         "source": "common"
       }
     ],
+    "unit_conversions": {}
+  },
+  {
+    "name": "Heart Rate",
+    "category": "Vitals",
+    "unit": "bpm",
+    "data_type": "float",
+    "protected": true,
+    "description": "Heart rate measured in beats per minute",
+    "aliases": [
+      "heart_rate",
+      "Pulse",
+      "HR",
+      "pulse rate"
+    ],
+    "reference_ranges": [
+      {
+        "sex": null,
+        "low": 60,
+        "high": 100,
+        "source": "common (resting, adult)"
+      }
+    ],
+    "unit_conversions": {}
+  },
+  {
+    "name": "Sleep Duration",
+    "category": "Sleep",
+    "unit": "minutes",
+    "data_type": "float",
+    "protected": true,
+    "description": "Total time asleep per sleep session",
+    "aliases": [
+      "sleep",
+      "sleep duration",
+      "time asleep",
+      "sleep time"
+    ],
+    "reference_ranges": [],
+    "unit_conversions": {
+      "hours": 0.0166667
+    }
+  },
+  {
+    "name": "Distance",
+    "category": "Fitness",
+    "unit": "meters",
+    "data_type": "float",
+    "protected": true,
+    "description": "Distance traveled over a time interval",
+    "aliases": [
+      "distance",
+      "distance traveled"
+    ],
+    "reference_ranges": [],
+    "unit_conversions": {
+      "km": 0.001,
+      "kilometers": 0.001,
+      "miles": 0.000621371,
+      "mi": 0.000621371
+    }
+  },
+  {
+    "name": "Calories",
+    "category": "Fitness",
+    "unit": "kcal",
+    "data_type": "float",
+    "protected": true,
+    "description": "Total daily energy expenditure",
+    "aliases": [
+      "calories",
+      "total calories",
+      "energy expenditure",
+      "calories burned"
+    ],
+    "reference_ranges": [],
+    "unit_conversions": {}
+  },
+  {
+    "name": "Body Temperature",
+    "category": "Vitals",
+    "unit": "°C",
+    "data_type": "float",
+    "protected": true,
+    "description": "Core body temperature",
+    "aliases": [
+      "body_temperature",
+      "core body temperature",
+      "temperature"
+    ],
+    "reference_ranges": [
+      {
+        "sex": null,
+        "low": 36.1,
+        "high": 37.2,
+        "source": "common"
+      }
+    ],
+    "unit_conversions": {
+      "°F": 33.8
+    }
+  },
+  {
+    "name": "Oxygen Saturation",
+    "category": "Vitals",
+    "unit": "%",
+    "data_type": "float",
+    "protected": true,
+    "description": "Blood oxygen saturation (SpO2)",
+    "aliases": [
+      "oxygen_saturation",
+      "SpO2",
+      "blood oxygen"
+    ],
+    "reference_ranges": [
+      {
+        "sex": null,
+        "low": 95,
+        "high": 100,
+        "source": "common"
+      }
+    ],
+    "unit_conversions": {}
+  },
+  {
+    "name": "Active Zone Minutes",
+    "category": "Fitness",
+    "unit": "minutes",
+    "data_type": "float",
+    "protected": true,
+    "description": "Active zone minutes earned (fat-burn=1, cardio/peak=2 per minute)",
+    "aliases": [
+      "heart_minutes",
+      "zone minutes"
+    ],
+    "reference_ranges": [],
+    "unit_conversions": {}
+  },
+  {
+    "name": "Active Minutes",
+    "category": "Fitness",
+    "unit": "minutes",
+    "data_type": "float",
+    "protected": true,
+    "description": "Minutes spent in light, moderate, or vigorous activity",
+    "aliases": [
+      "move_minutes",
+      "active minutes"
+    ],
+    "reference_ranges": [],
     "unit_conversions": {}
   }
 ]

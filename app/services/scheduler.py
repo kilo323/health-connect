@@ -11,6 +11,7 @@ from ..models.settings import ScheduleConfig, AppSettings
 from ..models.health_data import DocumentStatus
 from ..services.google_health import GoogleHealthService, NOT_LINKED_MARKER
 from ..services.nextcloud import NextcloudService
+from ..services.metric_normalizer import metric_normalizer
 
 logger = logging.getLogger(__name__)
 
@@ -94,14 +95,20 @@ async def sync_health_data(user_id: int, start_time, end_time, data_types: list[
                         if not extracted:
                             continue
                         value, recorded_at = extracted
+                        unit = UNIT_MAP.get(data_type, "unknown")
+
+                        # Link to the canonical MetricDefinition when one exists
+                        norm = await metric_normalizer.normalize(db, data_type, unit)
+                        definition_id = norm.definition.id if norm.definition else None
 
                         db.add(HealthMetric(
                             user_id=user_id,
-                            metric_type=data_type,
+                            metric_type=norm.canonical_name if norm.definition else data_type,
                             value=value,
-                            unit=UNIT_MAP.get(data_type, "unknown"),
+                            unit=unit,
                             recorded_at=recorded_at,
                             source="google_health_connect",
+                            definition_id=definition_id,
                         ))
                         await db.commit()
                         saved_count += 1

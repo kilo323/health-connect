@@ -609,89 +609,19 @@ async def refresh_from_library(
     if current_user.role != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
 
-    import json as _json
-    from pathlib import Path
-
-    # Locate the library file
-    data_dir = Path(__file__).resolve().parent.parent.parent / "data"
-    library_path = data_dir / "metric_library.json"
-    if not library_path.exists():
-        # Try Docker path
-        library_path = Path("/app/data/metric_library.json")
-    if not library_path.exists():
-        raise HTTPException(status_code=404, detail="metric_library.json not found")
+    from ..services.metric_normalizer import apply_metric_library
 
     try:
-        library = _json.loads(library_path.read_text(encoding="utf-8"))
-    except (_json.JSONDecodeError, OSError) as e:
+        summary = await apply_metric_library(db)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="metric_library.json not found")
+    except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to read library: {e}")
 
-    created = 0
-    updated = 0
-    skipped = 0
-
-    for entry in library:
-        name = entry.get("name", "").strip()
-        if not name:
-            skipped += 1
-            continue
-
-        # Check if definition already exists
-        result = await db.execute(
-            select(MetricDefinition).where(MetricDefinition.name == name)
-        )
-        existing = result.scalar_one_or_none()
-
-        # Build JSON fields
-        new_aliases = _json.dumps(entry.get("aliases", []))
-        new_ranges = _json.dumps(entry.get("reference_ranges", []))
-        new_conversions = _json.dumps(entry.get("unit_conversions", {}))
-
-        if existing:
-            # Merge aliases — keep existing + add new unique ones
-            existing_aliases = set()
-            try:
-                existing_aliases = set(_json.loads(existing.aliases or "[]"))
-            except (_json.JSONDecodeError, TypeError):
-                pass
-            new_alias_set = set(entry.get("aliases", []))
-            merged_aliases = list(existing_aliases | new_alias_set)
-
-            existing.aliases = _json.dumps(merged_aliases)
-            existing.reference_ranges = new_ranges
-            existing.unit_conversions = new_conversions
-            existing.category = entry.get("category") or existing.category
-            existing.unit = entry.get("unit") or existing.unit
-            existing.data_type = entry.get("data_type", existing.data_type)
-            existing.description = entry.get("description") or existing.description
-            updated += 1
-        else:
-            definition = MetricDefinition(
-                name=name,
-                category=entry.get("category"),
-                unit=entry.get("unit"),
-                data_type=entry.get("data_type", "float"),
-                description=entry.get("description"),
-                aliases=new_aliases,
-                reference_ranges=new_ranges,
-                unit_conversions=new_conversions,
-            )
-            db.add(definition)
-            created += 1
-
-    await db.commit()
-
-    # Invalidate normalizer cache and run normalization
-    from ..services.metric_normalizer import metric_normalizer
-    metric_normalizer._loaded = False
-    await metric_normalizer.load(db)
-    normalized = await metric_normalizer.retroactive_normalize(db)
-
-    logger.info(f"Library refresh: {created} created, {updated} updated, {skipped} skipped, {normalized} metrics normalized")
     return {
-        "message": f"Library refreshed: {created} created, {updated} updated. Normalized {normalized} metrics.",
-        "created": created,
-        "updated": updated,
-        "skipped": skipped,
-        "normalized": normalized,
+        "message": (
+            f"Library refreshed: {summary['created']} created, "
+            f"{summary['updated']} updated. Normalized {summary['normalized']} metrics."
+        ),
+        **summary,
     }

@@ -10,6 +10,12 @@ class Settings(BaseSettings):
     llm_api_token: str = ""
     llm_model: str = ""
 
+    # Metric library seeding. When true (default), library entries marked
+    # "protected": true (e.g. the hand-tuned Google Health definitions) are not
+    # overwritten when the library is applied or regenerated. Set the
+    # METRIC_LIBRARY_PROTECT env var to "false"/"0" to allow overwriting them.
+    metric_library_protect: bool = True
+
     # Google Health API webhook notifications (optional).
     # When webhook_secret is set, POST /api/webhooks/google-health accepts
     # push notifications instead of relying solely on scheduler polling.

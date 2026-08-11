@@ -100,7 +100,25 @@ async def lifespan(app: FastAPI):
             await db.close()
     else:
         logger.info("LLM_URL / LLM_API_TOKEN not set — skipping LLM config seed")
-    
+
+    # Seed metric definitions from the built-in metric library (idempotent).
+    # Creates/updates MetricDefinitions and re-links unmatched health_metrics.
+    try:
+        from .services.metric_normalizer import apply_metric_library
+        db = async_session_factory()
+        try:
+            summary = await apply_metric_library(db)
+            logger.info(
+                "Metric library seeded: "
+                f"{summary['created']} created, {summary['updated']} updated, "
+                f"{summary['normalized']} metrics normalized"
+            )
+        finally:
+            await db.close()
+    except Exception as e:
+        # Never let a malformed/missing library block startup
+        logger.warning(f"Metric library seed skipped: {e}")
+
     # Start scheduler if enabled
     try:
         db = async_session_factory()

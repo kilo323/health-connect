@@ -52,6 +52,18 @@ def load_dotenv(path: Path) -> dict[str, str]:
     return env
 
 
+def get_protect_flag(dotenv: dict[str, str]) -> bool:
+    """Whether to honor \"protected\": true entries (env METRIC_LIBRARY_PROTECT).
+
+    Default True — protected (hand-tuned) entries are not modified by merges.
+    Set METRIC_LIBRARY_PROTECT=0/false in .env or the environment to disable.
+    """
+    raw = os.environ.get("METRIC_LIBRARY_PROTECT") or dotenv.get("METRIC_LIBRARY_PROTECT")
+    if raw is None:
+        return True
+    return raw.strip().lower() not in ("0", "false", "no", "off")
+
+
 def get_config() -> dict[str, str]:
     """Load LLM config from .env with METRIC_LLM_ prefix (fallback to LLM_)."""
     dotenv = load_dotenv(ROOT / ".env")
@@ -304,8 +316,12 @@ def validate_definition(entry: dict) -> bool:
     return True
 
 
-def merge_definitions(existing: list[dict], new_entries: list[dict]) -> tuple[list[dict], dict]:
+def merge_definitions(existing: list[dict], new_entries: list[dict], protect: bool = True) -> tuple[list[dict], dict]:
     """Merge new definitions into existing library.
+
+    When ``protect`` is True, existing entries marked ``"protected": true`` are
+    left completely untouched (the LLM entry is skipped), so hand-tuned
+    definitions (e.g. the Google Health metrics) are never overwritten.
 
     Returns (merged_list, stats).
     """
@@ -319,6 +335,7 @@ def merge_definitions(existing: list[dict], new_entries: list[dict]) -> tuple[li
     created = 0
     updated = 0
     skipped = 0
+    protected = 0
 
     for entry in new_entries:
         if not validate_definition(entry):
@@ -332,8 +349,14 @@ def merge_definitions(existing: list[dict], new_entries: list[dict]) -> tuple[li
         existing_key = existing_names_lower.get(name_lower) or existing_aliases_lower.get(name_lower)
 
         if existing_key and existing_key in existing_by_name:
-            # Merge: add new aliases, update ranges/conversions
             existing_def = existing_by_name[existing_key]
+
+            # Leave protected definitions untouched
+            if protect and existing_def.get("protected") is True:
+                protected += 1
+                continue
+
+            # Merge: add new aliases, update ranges/conversions
             existing_aliases = set(existing_def.get("aliases", []))
             new_aliases = set(entry.get("aliases", []))
             existing_def["aliases"] = list(existing_aliases | new_aliases)
@@ -363,7 +386,7 @@ def merge_definitions(existing: list[dict], new_entries: list[dict]) -> tuple[li
                 existing_aliases_lower[alias.lower()] = name
             created += 1
 
-    return existing, {"created": created, "updated": updated, "skipped": skipped}
+    return existing, {"created": created, "updated": updated, "skipped": skipped, "protected": protected}
 
 
 def print_diff_summary(existing_before: list[dict], merged: list[dict], stats: dict):
@@ -381,6 +404,8 @@ def print_diff_summary(existing_before: list[dict], merged: list[dict], stats: d
     print(f"  Created:             {stats['created']}")
     print(f"  Updated (merged):    {stats['updated']}")
     print(f"  Skipped (invalid):   {stats['skipped']}")
+    if stats.get("protected"):
+        print(f"  Protected (kept):    {stats['protected']}")
     print()
 
     if new_names:
@@ -433,9 +458,10 @@ def main():
 
     print(f"LLM returned {len(new_entries)} definition(s)")
 
-    # Merge
+    # Merge (protected entries are left untouched when the flag is enabled)
+    protect = get_protect_flag(load_dotenv(ROOT / ".env"))
     existing_before = json.loads(json.dumps(existing))  # deep copy
-    merged, stats = merge_definitions(existing, new_entries)
+    merged, stats = merge_definitions(existing, new_entries, protect=protect)
 
     # Sort by name for consistent output
     merged.sort(key=lambda d: d["name"].lower())
