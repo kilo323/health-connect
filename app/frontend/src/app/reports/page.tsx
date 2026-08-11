@@ -97,11 +97,30 @@ function formatUnit(unit: string, metricType: string): string {
   return unit;
 }
 
+// ── Time Range Filters ───────────────────────────────────────────────────────
+// `days` is sent to /health/reports/overview. A value of 0 means "all time"
+// (the backend omits the date filter).
+const TIME_RANGES: Array<{ days: number; label: string }> = [
+  { days: 7, label: '7d' },
+  { days: 30, label: '30d' },
+  { days: 90, label: '90d' },
+  { days: 180, label: '180d' },
+  { days: 365, label: '1y' },
+  { days: 1095, label: '3y' },
+  { days: 1825, label: '5y' },
+  { days: 3650, label: '10y' },
+  { days: 0, label: 'All' },
+];
+
+function getRangeLabel(days: number): string {
+  return days === 0 ? 'All' : days < 365 ? `${days}d` : `${days / 365}y`;
+}
+
 export default function ReportsPage() {
   const [activeTab, setActiveTab] = useState<'overview'>('overview');
   const [data, setData] = useState<ReportData | null>(null);
   const [loading, setLoading] = useState(true);
-  const [period, setPeriod] = useState(30);
+  const [period, setPeriod] = useState<number>(30);
   const [selectedMetric, setSelectedMetric] = useState<string | null>(null);
 
   useEffect(() => {
@@ -147,18 +166,18 @@ export default function ReportsPage() {
     <AuthLayout>
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold text-gray-900">Reports</h1>
-        <div className="flex items-center gap-2">
-          {[7, 30, 90].map(d => (
+        <div className="flex flex-wrap items-center gap-2">
+          {TIME_RANGES.map((r) => (
             <button
-              key={d}
-              onClick={() => setPeriod(d)}
+              key={r.days}
+              onClick={() => setPeriod(r.days)}
               className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
-                period === d
+                period === r.days
                   ? 'bg-blue-600 text-white'
                   : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
               }`}
             >
-              {d}d
+              {r.label}
             </button>
           ))}
         </div>
@@ -249,7 +268,7 @@ export default function ReportsPage() {
                   {METRIC_LABELS[selectedMetric] || selectedMetric.replace(/_/g, ' ')} Trend
                 </h2>
                 <span className="text-sm text-gray-500">
-                  {chartData.length} data point{chartData.length !== 1 ? 's' : ''} over {period} days
+                  {chartData.length} data point{chartData.length !== 1 ? 's' : ''} over {getRangeLabel(period)}
                 </span>
               </div>
               <div className="h-72">
@@ -302,7 +321,7 @@ export default function ReportsPage() {
           {selectedMetric && chartData.length === 0 && summary.length > 0 && (
             <div className="card text-center py-8">
               <p className="text-gray-500">
-                No chart data for {METRIC_LABELS[selectedMetric] || selectedMetric} in the last {period} days.
+                No chart data for {METRIC_LABELS[selectedMetric] || selectedMetric} in the last {getRangeLabel(period)}.
               </p>
             </div>
           )}

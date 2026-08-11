@@ -120,6 +120,24 @@ const CATEGORY_ICONS: Record<string, string> = {
   'Body': '⚖️',
 };
 
+// ── Time Range Filters ───────────────────────────────────────────────────────
+// `days` is sent to the backend /health/reports/overview endpoint. A value of 0
+// is a sentinel meaning "all time" (the backend will omit the date filter).
+const TIME_RANGES: Array<{ days: number; label: string }> = [
+  { days: 30, label: '30d' },
+  { days: 90, label: '90d' },
+  { days: 180, label: '180d' },
+  { days: 365, label: '1y' },
+  { days: 1095, label: '3y' },
+  { days: 1825, label: '5y' },
+  { days: 3650, label: '10y' },
+  { days: 0, label: 'All' },
+];
+
+function periodLabel(days: number): string {
+  return TIME_RANGES.find((r) => r.days === days)?.label ?? `${days}d`;
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 function findDefinition(name: string, defs: MetricDefinition[]): MetricDefinition | undefined {
@@ -307,7 +325,7 @@ export default function DashboardPage() {
   const [selectedMetric, setSelectedMetric] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
   const [collapsedCategories, setCollapsedCategories] = useState<Set<string>>(new Set());
-  const [period, setPeriod] = useState(90);
+  const [period, setPeriod] = useState<number>(90);
 
   useEffect(() => { loadData(); }, [period]);
 
@@ -388,11 +406,11 @@ export default function DashboardPage() {
           <p className="text-sm text-gray-500 mt-1">Your key health metrics at a glance</p>
         </div>
         <div className="flex items-center gap-3">
-          <div className="flex items-center gap-1 bg-gray-100 rounded-lg p-1">
-            {[30, 90, 180, 365].map((d) => (
-              <button key={d} onClick={() => setPeriod(d)}
-                className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${period === d ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
-                {d < 365 ? `${d}d` : '1y'}
+          <div className="flex flex-wrap items-center gap-1 bg-gray-100 rounded-lg p-1">
+            {TIME_RANGES.map((r) => (
+              <button key={r.days} onClick={() => setPeriod(r.days)}
+                className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${period === r.days ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
+                {r.label}
               </button>
             ))}
           </div>
@@ -442,7 +460,7 @@ export default function DashboardPage() {
               </div>
             )}
           </div>
-          <div className="text-xs text-gray-400">{period}d trend · {healthSummary.total} metrics tracked</div>
+          <div className="text-xs text-gray-400">{periodLabel(period)} trend · {healthSummary.total} metrics tracked</div>
         </div>
       </div>
 
