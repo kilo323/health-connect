@@ -29,3 +29,7 @@ docker compose -f docker-compose.dev.yml down
 | Backend | `uvicorn` | `uvicorn --reload` |
 | Source | Baked into image | Volume-mounted |
 | Rebuild needed? | Yes, for any change | No, live reload |
+
+**Helper Scripts**
+- There are issues with multi-line and escaping when developing on Windows.  Write scripts to execute when doing commands of this nature.
+- Save all non-application used scripts in scripts
