@@ -9,6 +9,7 @@ export interface MetricCardProps {
   value: number | null;
   unit: string;
   recordedAt?: string;
+  date?: string; // "YYYY-MM-DD" format, displayed as-is without timezone conversion
   trend: 'up' | 'down' | 'flat' | null;
   trendPct: number | null;
   trendData: number[];
@@ -128,6 +129,17 @@ function formatMetricValue(value: number | null): string {
   return value.toFixed(1);
 }
 
+/** Format a "YYYY-MM-DD" date string without timezone conversion */
+function formatDateStr(dateStr: string): string {
+  const [year, month, day] = dateStr.split('-').map(Number);
+  const d = new Date(year, month - 1, day);
+  return d.toLocaleDateString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  });
+}
+
 function formatRange(low: number | null, high: number | null, unit: string): string {
   if (low != null && high != null) return `${low} – ${high} ${unit}`;
   if (low != null) return `≥ ${low} ${unit}`;
@@ -141,6 +153,7 @@ export default function MetricCard({
   value,
   unit,
   recordedAt,
+  date,
   trend,
   trendPct,
   trendData,
@@ -218,11 +231,12 @@ export default function MetricCard({
       {/* Footer */}
       <div className="flex items-center justify-between pl-2">
         <TrendIndicator trend={trend} pct={trendPct} />
-        {recordedAt && (
+        {(date || recordedAt) && (
           <span className="text-xs text-gray-400">
-            {new Date(recordedAt).toLocaleDateString('en-US', {
+            {date ? formatDateStr(date) : new Date(recordedAt!).toLocaleDateString('en-US', {
               month: 'short',
               day: 'numeric',
+              year: 'numeric',
             })}
           </span>
         )}

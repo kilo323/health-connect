@@ -6,7 +6,7 @@ import MetricCard from '@/components/MetricCard';
 import Sparkline from '@/components/Sparkline';
 import {
   Activity, Loader2, LayoutGrid, List, ChevronDown, ChevronRight,
-  TrendingUp, TrendingDown, Minus, CheckCircle, AlertTriangle,
+  TrendingUp, TrendingDown, Minus, CheckCircle, AlertTriangle, X,
 } from 'lucide-react';
 import apiClient from '@/lib/api-client';
 import {
@@ -44,6 +44,7 @@ interface MetricSummary {
   latest_value: number;
   unit: string;
   recorded_at: string;
+  date: string; // "YYYY-MM-DD" format
   trend: 'up' | 'down' | 'flat' | null;
   trend_pct: number | null;
   recent_avg: number | null;
@@ -213,7 +214,6 @@ function DetailChart({
     <div>
       <div className="flex items-center justify-between mb-4">
         <div>
-          <h3 className="text-lg font-semibold text-gray-900">{name}</h3>
           {definition?.description && <p className="text-sm text-gray-500">{definition.description}</p>}
         </div>
         {summary && (
@@ -224,19 +224,26 @@ function DetailChart({
         )}
       </div>
 
-      <ResponsiveContainer width="100%" height={240}>
+      <ResponsiveContainer width="100%" height={320}>
         <LineChart data={timeSeries} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
           <XAxis
             dataKey="date"
             tick={{ fontSize: 11, fill: '#9ca3af' }}
-            tickFormatter={(v) => { const d = new Date(v); return `${d.getMonth() + 1}/${d.getDate()}`; }}
+            tickFormatter={(v) => {
+              const parts = v.split('-');
+              return `${parseInt(parts[1])}/${parseInt(parts[2])}`;
+            }}
           />
           <YAxis domain={[min - padding, max + padding]} tick={{ fontSize: 11, fill: '#9ca3af' }} width={50} />
           {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
           <Tooltip
             contentStyle={{ backgroundColor: 'white', border: '1px solid #e5e7eb', borderRadius: '8px', fontSize: '13px' }}
-            labelFormatter={(v: any) => new Date(String(v)).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}
+            labelFormatter={(v: any) => {
+              const parts = String(v).split('-');
+              const d = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
+              return d.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+            }}
             formatter={(value: any) => [`${value} ${definition?.unit || ''}`, name]}
           />
           {low != null && (
@@ -325,9 +332,17 @@ export default function DashboardPage() {
   const [selectedMetric, setSelectedMetric] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
   const [collapsedCategories, setCollapsedCategories] = useState<Set<string>>(new Set());
-  const [period, setPeriod] = useState<number>(90);
+  const [period, setPeriod] = useState<number>(0);
 
   useEffect(() => { loadData(); }, [period]);
+
+  // Close modal on Escape key
+  useEffect(() => {
+    if (!selectedMetric) return;
+    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') setSelectedMetric(null); };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [selectedMetric]);
 
   const loadData = async () => {
     setLoading(true);
@@ -354,6 +369,8 @@ export default function DashboardPage() {
     for (const config of CORE_METRICS) {
       const def = findDefinition(config.name, definitions);
       const summary = findSummary(config.name, reportData?.summary || []);
+      // Skip metrics with no data
+      if (!summary) continue;
       const ts = findTimeSeries(config.name, reportData?.time_series || {});
       const { low, high } = def ? getDefaultRange(def) : { low: null, high: null };
       groups[config.category].push({ config, definition: def, summary, trendData: ts.map((p) => p.value), refLow: low, refHigh: high });
@@ -363,11 +380,11 @@ export default function DashboardPage() {
   }, [definitions, reportData]);
 
   const healthSummary = useMemo(() => {
-    let total = 0, normal = 0, borderline = 0, outOfRange = 0, noData = 0;
+    let total = 0, normal = 0, borderline = 0, outOfRange = 0;
     for (const config of CORE_METRICS) {
       const def = findDefinition(config.name, definitions);
       const summary = findSummary(config.name, reportData?.summary || []);
-      if (!summary) { noData++; continue; }
+      if (!summary) continue;
       total++;
       const { low, high } = def ? getDefaultRange(def) : { low: null, high: null };
       const status = getRangeStatus(summary.latest_value, low, high);
@@ -376,7 +393,7 @@ export default function DashboardPage() {
       else if (status === 'out-of-range') outOfRange++;
       else normal++;
     }
-    return { total, normal, borderline, outOfRange, noData };
+    return { total, normal, borderline, outOfRange };
   }, [definitions, reportData]);
 
   const toggleCategory = (cat: string) => {
@@ -400,27 +417,37 @@ export default function DashboardPage() {
   return (
     <AuthLayout>
       {/* Header */}
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between mb-6 gap-3">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Health Dashboard</h1>
           <p className="text-sm text-gray-500 mt-1">Your key health metrics at a glance</p>
         </div>
         <div className="flex items-center gap-3">
-          <div className="flex flex-wrap items-center gap-1 bg-gray-100 rounded-lg p-1">
+          {/* Time range: buttons on sm+, dropdown on small screens */}
+          <div className="hidden sm:flex items-center gap-1 bg-gray-100 rounded-lg p-1">
             {TIME_RANGES.map((r) => (
               <button key={r.days} onClick={() => setPeriod(r.days)}
-                className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${period === r.days ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
+                className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors cursor-pointer ${period === r.days ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
                 {r.label}
               </button>
             ))}
           </div>
+          <select
+            value={period}
+            onChange={(e) => setPeriod(Number(e.target.value))}
+            className="sm:hidden px-3 py-1.5 rounded-md text-xs font-medium bg-gray-100 text-gray-700 border-none outline-none cursor-pointer"
+          >
+            {TIME_RANGES.map((r) => (
+              <option key={r.days} value={r.days}>{r.label}</option>
+            ))}
+          </select>
           <div className="flex items-center gap-1 bg-gray-100 rounded-lg p-1">
             <button onClick={() => setViewMode('grid')}
-              className={`p-1.5 rounded-md transition-colors ${viewMode === 'grid' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-400'}`}>
+              className={`p-1.5 rounded-md transition-colors cursor-pointer ${viewMode === 'grid' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-400'}`}>
               <LayoutGrid className="h-4 w-4" />
             </button>
             <button onClick={() => setViewMode('list')}
-              className={`p-1.5 rounded-md transition-colors ${viewMode === 'list' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-400'}`}>
+              className={`p-1.5 rounded-md transition-colors cursor-pointer ${viewMode === 'list' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-400'}`}>
               <List className="h-4 w-4" />
             </button>
           </div>
@@ -453,30 +480,25 @@ export default function DashboardPage() {
                 <span className="text-sm text-gray-600"><span className="font-semibold">{healthSummary.outOfRange}</span> Out of Range</span>
               </div>
             )}
-            {healthSummary.noData > 0 && (
-              <div className="flex items-center gap-1.5">
-                <div className="w-2.5 h-2.5 rounded-full bg-gray-300" />
-                <span className="text-sm text-gray-600"><span className="font-semibold">{healthSummary.noData}</span> No Data</span>
-              </div>
-            )}
           </div>
-          <div className="text-xs text-gray-400">{periodLabel(period)} trend · {healthSummary.total} metrics tracked</div>
+          <div className="text-xs text-gray-400">{periodLabel(period)} trend · {healthSummary.total} metrics</div>
         </div>
       </div>
 
       {/* Metric Categories */}
       {CATEGORY_ORDER.map((category) => {
         const metrics = groupedMetrics[category] || [];
+        // Hide categories with no data
+        if (metrics.length === 0) return null;
         const isCollapsed = collapsedCategories.has(category);
-        const withData = metrics.filter((m) => m.summary).length;
 
         return (
           <div key={category} className="mb-6">
             <button onClick={() => toggleCategory(category)}
-              className="flex items-center gap-2 mb-3 group w-full text-left">
+              className="flex items-center gap-2 mb-3 group w-full text-left cursor-pointer">
               <span className="text-lg">{CATEGORY_ICONS[category] || '📊'}</span>
               <h2 className="text-base font-semibold text-gray-800">{category}</h2>
-              <span className="text-xs text-gray-400 ml-1">({withData}/{metrics.length})</span>
+              <span className="text-xs text-gray-400 ml-1">({metrics.length})</span>
               <div className="flex-1" />
               {isCollapsed
                 ? <ChevronRight className="h-4 w-4 text-gray-400 group-hover:text-gray-600" />
@@ -492,6 +514,7 @@ export default function DashboardPage() {
                       value={m.summary?.latest_value ?? null}
                       unit={m.summary?.unit || m.definition?.unit || ''}
                       recordedAt={m.summary?.recorded_at}
+                      date={m.summary?.date}
                       trend={m.summary?.trend ?? null} trendPct={m.summary?.trend_pct ?? null}
                       trendData={m.trendData} referenceLow={m.refLow} referenceHigh={m.refHigh}
                       selected={selectedMetric === m.config.name}
@@ -517,13 +540,43 @@ export default function DashboardPage() {
         );
       })}
 
-      {/* Expanded Detail Chart */}
+      {/* Detail Chart Modal */}
       {selectedMetric && (
-        <div className="card mt-6">
-          <DetailChart name={selectedMetric}
-            definition={findDefinition(selectedMetric, definitions)}
-            timeSeries={findTimeSeries(selectedMetric, reportData?.time_series || {})}
-            summary={findSummary(selectedMetric, reportData?.summary || [])} />
+        <div
+          className="fixed inset-0 z-50 flex items-end sm:items-center justify-center"
+          onClick={(e) => { if (e.target === e.currentTarget) setSelectedMetric(null); }}
+          role="dialog"
+          aria-modal="true"
+          aria-label={`${selectedMetric} detail`}
+        >
+          {/* Backdrop */}
+          <div className="absolute inset-0 bg-black/40" />
+
+          {/* Panel: bottom sheet on mobile, centered card on desktop */}
+          <div className="relative w-full sm:w-[85vw] lg:w-[75vw] xl:w-[65vw] sm:max-w-5xl mx-0 sm:mx-6
+                          bg-white rounded-t-2xl sm:rounded-2xl shadow-2xl
+                          max-h-[85vh] overflow-y-auto">
+            {/* Mobile drag handle */}
+            <div className="flex justify-center pt-3 sm:hidden">
+              <div className="w-10 h-1 rounded-full bg-gray-300" />
+            </div>
+            <div className="sticky top-0 z-10 flex items-center justify-between px-6 pt-4 pb-3 bg-white border-b border-gray-100">
+              <h2 className="text-lg font-semibold text-gray-900">{selectedMetric}</h2>
+              <button
+                onClick={() => setSelectedMetric(null)}
+                className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors cursor-pointer"
+                aria-label="Close"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <div className="px-6 sm:px-8 pb-6 sm:pb-8">
+              <DetailChart name={selectedMetric}
+                definition={findDefinition(selectedMetric, definitions)}
+                timeSeries={findTimeSeries(selectedMetric, reportData?.time_series || {})}
+                summary={findSummary(selectedMetric, reportData?.summary || [])} />
+            </div>
+          </div>
         </div>
       )}
 

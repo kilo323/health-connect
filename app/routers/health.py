@@ -415,7 +415,7 @@ async def get_report_overview(
     db: AsyncSession = Depends(get_db)
 ):
     """Get health report overview with latest values, trends, and time series data"""
-    from sqlalchemy import func as sa_func
+    from sqlalchemy import func as sa_func, and_
     from datetime import timedelta
 
     try:
@@ -424,18 +424,36 @@ async def get_report_overview(
         # days == 0 is a sentinel for "all time"; otherwise apply a date window
         start_date = now - timedelta(days=days) if days > 0 else None
 
-        # Get latest value per metric type
-        subq = (
+        # Get latest value per metric type (by most recent recorded_at, breaking ties with max id)
+        max_date_subq = (
+            select(
+                HealthMetric.metric_type,
+                sa_func.max(HealthMetric.recorded_at).label("max_recorded_at"),
+            )
+            .where(HealthMetric.user_id == user_id)
+            .group_by(HealthMetric.metric_type)
+            .subquery()
+        )
+        # For metrics with multiple entries on the same latest date, pick the one with the highest id
+        max_id_subq = (
             select(
                 HealthMetric.metric_type,
                 sa_func.max(HealthMetric.id).label("max_id"),
+            )
+            .select_from(HealthMetric)
+            .join(
+                max_date_subq,
+                and_(
+                    HealthMetric.metric_type == max_date_subq.c.metric_type,
+                    HealthMetric.recorded_at == max_date_subq.c.max_recorded_at,
+                ),
             )
             .where(HealthMetric.user_id == user_id)
             .group_by(HealthMetric.metric_type)
             .subquery()
         )
         latest_result = await db.execute(
-            select(HealthMetric).join(subq, HealthMetric.id == subq.c.max_id)
+            select(HealthMetric).join(max_id_subq, HealthMetric.id == max_id_subq.c.max_id)
         )
         latest_metrics = latest_result.scalars().all()
 
@@ -514,6 +532,7 @@ async def get_report_overview(
                 "latest_value": m.value,
                 "unit": m.unit or "",
                 "recorded_at": m.recorded_at.isoformat() if m.recorded_at else None,
+                "date": m.recorded_at.strftime("%Y-%m-%d") if m.recorded_at else None,
                 "trend": trend,
                 "trend_pct": trend_pct,
                 "recent_avg": round(recent_avg, 2) if recent_avg else None,
