@@ -497,11 +497,12 @@ async def get_report_overview(
                         "date": day_key,
                         "value": m.value,
                         "unit": m.unit or "",
+                        "source": m.source or "",
                         "_ts": m.recorded_at,
                     }
             # Remove internal _ts field and sort
             time_series[metric_type] = sorted(
-                [{"date": v["date"], "value": v["value"], "unit": v["unit"]} for v in daily.values()],
+                [{"date": v["date"], "value": v["value"], "unit": v["unit"], "source": v["source"]} for v in daily.values()],
                 key=lambda x: x["date"],
             )
 

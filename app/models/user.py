@@ -23,6 +23,8 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
+    # JSON list of metric names to show on the dashboard; None = use default set
+    dashboard_metrics: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Relationships (use string annotations for forward references)
     health_metrics: Mapped[list["HealthMetric"]] = relationship("HealthMetric", back_populates="user", cascade="all, delete-orphan")

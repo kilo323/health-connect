@@ -14,7 +14,7 @@ from ..models.health_data import MetricDefinition
 from ..schemas.auth import (
     UserCreate, UserUpdate, UserResponse, LoginResponse,
     ProfileUpdate, PasswordChange, UnitPreferenceSet, UnitPreferenceResponse,
-    MetricSearchResult,
+    MetricSearchResult, DashboardMetricsSet, DashboardMetricsResponse,
 )
 
 router = APIRouter(tags=["Users"])
@@ -312,6 +312,47 @@ async def search_metrics_for_units(
         )
         for _, d in scored[:20]
     ]
+
+
+# ── Dashboard metric selection ────────────────────────────────────────────────
+
+
+@router.get("/me/dashboard-metrics", response_model=DashboardMetricsResponse)
+async def get_dashboard_metrics(
+    current_user: User = Depends(get_current_active_user),
+):
+    """Return the user's selected dashboard metrics. Falls back to the default set."""
+    if current_user.dashboard_metrics:
+        try:
+            names = json.loads(current_user.dashboard_metrics)
+            if isinstance(names, list) and names:
+                return DashboardMetricsResponse(metric_names=names, is_default=False)
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return DashboardMetricsResponse(metric_names=[], is_default=True)
+
+
+@router.put("/me/dashboard-metrics")
+async def set_dashboard_metrics(
+    body: DashboardMetricsSet,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Set the user's dashboard metric selection. Pass an empty list to revert to default."""
+    if not body.metric_names:
+        current_user.dashboard_metrics = None
+    else:
+        # Deduplicate while preserving order
+        seen: set[str] = set()
+        unique: list[str] = []
+        for n in body.metric_names:
+            if n not in seen:
+                seen.add(n)
+                unique.append(n)
+        current_user.dashboard_metrics = json.dumps(unique)
+    db.add(current_user)
+    await db.commit()
+    return {"message": "Dashboard metrics updated"}
 
 
 @router.post("", response_model=UserResponse, status_code=status.HTTP_201_CREATED)

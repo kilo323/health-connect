@@ -75,3 +75,14 @@ class MetricSearchResult(BaseModel):
     canonical_unit: str | None
     available_units: list[str]
     preferred_unit: str | None = None  # user's current preference, if set
+
+
+class DashboardMetricsSet(BaseModel):
+    """Set the list of metric names shown on the dashboard. Empty list = revert to default."""
+    metric_names: list[str]
+
+
+class DashboardMetricsResponse(BaseModel):
+    """The user's dashboard metric selection. is_default=True when no custom selection is stored."""
+    metric_names: list[str]
+    is_default: bool

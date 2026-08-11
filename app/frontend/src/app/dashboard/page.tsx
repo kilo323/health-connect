@@ -7,6 +7,7 @@ import Sparkline from '@/components/Sparkline';
 import {
   Activity, Loader2, LayoutGrid, List, ChevronDown, ChevronRight,
   TrendingUp, TrendingDown, Minus, CheckCircle, AlertTriangle, X,
+  Settings2, RotateCcw,
 } from 'lucide-react';
 import apiClient from '@/lib/api-client';
 import { useUnitConversion } from '@/hooks/useUnitConversion';
@@ -56,6 +57,7 @@ interface TimeSeriesPoint {
   date: string;
   value: number;
   unit: string;
+  source: string;
 }
 
 interface ReportData {
@@ -121,6 +123,9 @@ const CATEGORY_ICONS: Record<string, string> = {
   'Nutrients': '💊',
   'Body': '⚖️',
 };
+
+/** Default dashboard metric names derived from CORE_METRICS. */
+const DEFAULT_METRIC_NAMES: string[] = CORE_METRICS.map((m) => m.name);
 
 // ── Time Range Filters ───────────────────────────────────────────────────────
 // `days` is sent to the backend /health/reports/overview endpoint. A value of 0
@@ -253,15 +258,28 @@ function DetailChart({
             }}
           />
           <YAxis domain={[min - padding, max + padding]} tick={{ fontSize: 11, fill: '#9ca3af' }} width={50} />
-          {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
           <Tooltip
-            contentStyle={{ backgroundColor: 'white', border: '1px solid #e5e7eb', borderRadius: '8px', fontSize: '13px' }}
-            labelFormatter={(v: any) => {
-              const parts = String(v).split('-');
+            content={({ active, payload }: any) => {
+              if (!active || !payload?.length) return null;
+              const point = payload[0].payload as TimeSeriesPoint;
+              const parts = point.date.split('-');
               const d = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
-              return d.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+              const dateLabel = d.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+              return (
+                <div style={{ backgroundColor: 'white', border: '1px solid #e5e7eb', borderRadius: '8px', fontSize: '13px', padding: '8px 12px' }}>
+                  <div style={{ color: '#374151', fontWeight: 600, marginBottom: '2px' }}>{dateLabel}</div>
+                  <div style={{ color: '#111827' }}>{point.value} {displayUnit}</div>
+                  {point.source && (
+                    <div style={{ color: '#9ca3af', fontSize: '11px', marginTop: '2px' }}>
+                      {point.source === 'google_health_connect' ? 'Google Health' :
+                       point.source === 'document_analysis' ? 'Document Import' :
+                       point.source === 'manual' ? 'Manual Entry' :
+                       point.source}
+                    </div>
+                  )}
+                </div>
+              );
             }}
-            formatter={(value: any) => [`${value} ${displayUnit}`, name]}
           />
           {low != null && (
             <ReferenceLine y={low} stroke="#ef4444" strokeDasharray="6 4" strokeWidth={1}
@@ -341,6 +359,133 @@ function ListRow({
   );
 }
 
+// ── Metric Toggle List (for customize modal) ────────────────────────────────
+
+function MetricToggleList({
+  definitions,
+  selected,
+  onToggle,
+}: {
+  definitions: MetricDefinition[];
+  selected: string[];
+  onToggle: (name: string) => void;
+}) {
+  // Build a name→definition lookup (also match by alias for CORE_METRICS names)
+  const defByName = useMemo(() => {
+    const map = new Map<string, MetricDefinition>();
+    for (const d of definitions) {
+      map.set(d.name, d);
+      map.set(d.name.toLowerCase(), d);
+      for (const a of d.aliases || []) map.set(a.toLowerCase(), d);
+    }
+    return map;
+  }, [definitions]);
+
+  // Collect every unique metric: all definitions + any selected names not in definitions
+  const allMetrics = useMemo(() => {
+    const isDefSelected = (d: MetricDefinition): boolean => {
+      for (const sel of selected) {
+        if (sel === d.name || sel.toLowerCase() === d.name.toLowerCase()) return true;
+        if (d.aliases?.some((a) => a.toLowerCase() === sel.toLowerCase())) return true;
+      }
+      return false;
+    };
+
+    const seen = new Set<string>();
+    const items: Array<{ name: string; category: string; isSelected: boolean }> = [];
+    for (const d of definitions) {
+      if (seen.has(d.name)) continue;
+      seen.add(d.name);
+      items.push({ name: d.name, category: d.category || 'Other', isSelected: isDefSelected(d) });
+    }
+    // Selected names that don't match any definition (e.g. CORE_METRICS names like "Hemoglobin A1c")
+    for (const name of selected) {
+      if (seen.has(name)) continue;
+      const def = defByName.get(name) || defByName.get(name.toLowerCase());
+      if (def && seen.has(def.name)) {
+        // The definition already covers this selected name; mark it selected in-place
+        const existing = items.find((i) => i.name === def.name);
+        if (existing) existing.isSelected = true;
+        continue;
+      }
+      seen.add(name);
+      items.push({ name, category: def?.category || 'Other', isSelected: true });
+    }
+    return items;
+  }, [definitions, selected, defByName]);
+
+  // Group by category, selected first
+  const grouped = useMemo(() => {
+    const selectedItems = allMetrics.filter((m) => m.isSelected);
+    const unselectedItems = allMetrics.filter((m) => !m.isSelected);
+
+    const buildGroups = (items: typeof allMetrics) => {
+      const map = new Map<string, typeof allMetrics>();
+      for (const item of items) {
+        const list = map.get(item.category) || [];
+        list.push(item);
+        map.set(item.category, list);
+      }
+      // Sort categories: known order first, then alphabetical
+      const knownOrder = CATEGORY_ORDER.filter((c) => map.has(c));
+      const extra = Array.from(map.keys()).filter((c) => !CATEGORY_ORDER.includes(c)).sort();
+      return [...knownOrder, ...extra].map((cat) => ({ category: cat, items: map.get(cat)! }));
+    };
+
+    return { selectedGroups: buildGroups(selectedItems), unselectedGroups: buildGroups(unselectedItems) };
+  }, [allMetrics]);
+
+  const renderGroup = (group: { category: string; items: typeof allMetrics }) => (
+    <div key={group.category}>
+      <div className="text-xs font-medium text-gray-400 uppercase tracking-wider px-1 pt-3 pb-1">
+        {CATEGORY_ICONS[group.category] || '📊'} {group.category}
+      </div>
+      {group.items.map((m) => {
+        const isOn = m.isSelected;
+        return (
+          <button
+            key={m.name}
+            onClick={() => onToggle(m.name)}
+            className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-left text-sm transition-colors cursor-pointer ${
+              isOn
+                ? 'bg-blue-50 text-blue-800 hover:bg-blue-100'
+                : 'text-gray-700 hover:bg-gray-50'
+            }`}
+          >
+            <div className={`w-[18px] h-[18px] rounded border-2 flex items-center justify-center flex-shrink-0 transition-colors ${
+              isOn ? 'bg-blue-600 border-blue-600' : 'border-gray-300'
+            }`}>
+              {isOn && <CheckCircle className="h-3 w-3 text-white" />}
+            </div>
+            <span className="flex-1">{m.name}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+
+  return (
+    <div>
+      {grouped.selectedGroups.length > 0 && (
+        <div className="mb-2">
+          <div className="text-xs font-semibold text-blue-600 uppercase tracking-wider px-1 pb-1">
+            Selected ({grouped.selectedGroups.reduce((n, g) => n + g.items.length, 0)})
+          </div>
+          {grouped.selectedGroups.map(renderGroup)}
+        </div>
+      )}
+      {grouped.unselectedGroups.length > 0 && (
+        <div>
+          {grouped.selectedGroups.length > 0 && (
+            <div className="border-t border-gray-100 my-2" />
+          )}
+          {grouped.unselectedGroups.map(renderGroup)}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Main Dashboard ───────────────────────────────────────────────────────────
 
 export default function DashboardPage() {
@@ -353,7 +498,15 @@ export default function DashboardPage() {
   const [period, setPeriod] = useState<number>(0);
   const { convert, formatValue: formatMetricDisplay, getDisplayUnit, loaded: unitsLoaded } = useUnitConversion();
 
+  // Dashboard metric selection
+  const [customMetrics, setCustomMetrics] = useState<string[] | null>(null); // null = default
+  const [showCustomize, setShowCustomize] = useState(false);
+  const [editMetrics, setEditMetrics] = useState<string[]>([]);
+  const [saving, setSaving] = useState(false);
+
   useEffect(() => { loadData(); }, [period]);
+
+  useEffect(() => { loadDashboardMetrics(); }, []);
 
   // Close modal on Escape key
   useEffect(() => {
@@ -379,14 +532,108 @@ export default function DashboardPage() {
     }
   };
 
+  const loadDashboardMetrics = async () => {
+    try {
+      const res = await apiClient.get('/users/me/dashboard-metrics');
+      if (res.data.is_default) {
+        setCustomMetrics(null);
+      } else {
+        setCustomMetrics(res.data.metric_names);
+      }
+    } catch {
+      setCustomMetrics(null);
+    }
+  };
+
+  /** The effective list of metric names to display, in order. */
+  const activeMetricNames: string[] = customMetrics ?? DEFAULT_METRIC_NAMES;
+
+  /** Build MetricConfig list from active metric names, preserving category/priority for known metrics. */
+  const activeMetrics: MetricConfig[] = useMemo(() => {
+    return activeMetricNames.map((name, i) => {
+      const core = CORE_METRICS.find((c) => c.name === name);
+      if (core) return core;
+      // Custom metric not in CORE list — find its definition for category
+      const def = findDefinition(name, definitions);
+      return { name, category: def?.category || 'Other', priority: i + 100 };
+    });
+  }, [activeMetricNames, definitions]);
+
+  // Collect dynamic categories that might not be in CATEGORY_ORDER
+  const activeCategories: string[] = useMemo(() => {
+    const cats = new Set(CATEGORY_ORDER);
+    for (const m of activeMetrics) {
+      if (!cats.has(m.category)) cats.add(m.category);
+    }
+    // Preserve CATEGORY_ORDER first, then extras alphabetically
+    const ordered = CATEGORY_ORDER.filter((c) => cats.has(c));
+    const extras = Array.from(cats).filter((c) => !CATEGORY_ORDER.includes(c)).sort();
+    return [...ordered, ...extras];
+  }, [activeMetrics]);
+
+  const openCustomize = () => {
+    setEditMetrics([...activeMetricNames]);
+    setShowCustomize(true);
+  };
+
+  const toggleMetric = (name: string) => {
+    // Resolve name: if it's a definition name, check if any selected entry maps to that same definition
+    const def = definitions.find((d) => d.name === name);
+    if (!def) {
+      // Not a definition — plain toggle
+      setEditMetrics((prev) =>
+        prev.includes(name) ? prev.filter((n) => n !== name) : [...prev, name]
+      );
+      return;
+    }
+    // Check if any currently-selected name resolves to this definition
+    const matchIdx = editMetrics.findIndex((sel) => {
+      if (sel === def.name || sel.toLowerCase() === def.name.toLowerCase()) return true;
+      return def.aliases?.some((a) => a.toLowerCase() === sel.toLowerCase()) ?? false;
+    });
+    if (matchIdx >= 0) {
+      // Remove the existing entry (whatever form it's in)
+      setEditMetrics((prev) => prev.filter((_, i) => i !== matchIdx));
+    } else {
+      setEditMetrics((prev) => [...prev, def.name]);
+    }
+  };
+
+  const saveCustomize = async () => {
+    setSaving(true);
+    try {
+      await apiClient.put('/users/me/dashboard-metrics', { metric_names: editMetrics });
+      setCustomMetrics(editMetrics.length > 0 ? editMetrics : null);
+      setShowCustomize(false);
+    } catch (error) {
+      console.error('Failed to save dashboard metrics:', error);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const revertToDefault = async () => {
+    setSaving(true);
+    try {
+      await apiClient.put('/users/me/dashboard-metrics', { metric_names: [] });
+      setCustomMetrics(null);
+      setEditMetrics([...DEFAULT_METRIC_NAMES]);
+      setShowCustomize(false);
+    } catch (error) {
+      console.error('Failed to revert dashboard metrics:', error);
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const groupedMetrics = useMemo(() => {
     const groups: Record<string, Array<{
       config: MetricConfig; definition?: MetricDefinition; summary?: MetricSummary;
       trendData: number[]; refLow: number | null; refHigh: number | null;
       displayValue: number | null; displayUnit: string; formattedDisplay: string;
     }>> = {};
-    for (const cat of CATEGORY_ORDER) groups[cat] = [];
-    for (const config of CORE_METRICS) {
+    for (const cat of activeCategories) groups[cat] = [];
+    for (const config of activeMetrics) {
       const def = findDefinition(config.name, definitions);
       const summary = findSummary(config.name, reportData?.summary || []);
       // Skip metrics with no data
@@ -405,13 +652,13 @@ export default function DashboardPage() {
         formattedDisplay: formatMetricDisplay(converted.value, converted.unit),
       });
     }
-    for (const cat of CATEGORY_ORDER) groups[cat].sort((a, b) => a.config.priority - b.config.priority);
+    for (const cat of activeCategories) groups[cat].sort((a, b) => a.config.priority - b.config.priority);
     return groups;
-  }, [definitions, reportData, convert, formatMetricDisplay]);
+  }, [definitions, reportData, convert, formatMetricDisplay, activeMetrics, activeCategories]);
 
   const healthSummary = useMemo(() => {
     let total = 0, normal = 0, borderline = 0, outOfRange = 0;
-    for (const config of CORE_METRICS) {
+    for (const config of activeMetrics) {
       const def = findDefinition(config.name, definitions);
       const summary = findSummary(config.name, reportData?.summary || []);
       if (!summary) continue;
@@ -424,7 +671,7 @@ export default function DashboardPage() {
       else normal++;
     }
     return { total, normal, borderline, outOfRange };
-  }, [definitions, reportData]);
+  }, [definitions, reportData, activeMetrics]);
 
   const toggleCategory = (cat: string) => {
     setCollapsedCategories((prev) => {
@@ -481,6 +728,14 @@ export default function DashboardPage() {
               <List className="h-4 w-4" />
             </button>
           </div>
+          <button
+            onClick={openCustomize}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-gray-100 text-gray-600 hover:bg-gray-200 transition-colors cursor-pointer"
+            title="Customize dashboard metrics"
+          >
+            <Settings2 className="h-3.5 w-3.5" />
+            Customize
+          </button>
         </div>
       </div>
 
@@ -516,7 +771,7 @@ export default function DashboardPage() {
       </div>
 
       {/* Metric Categories */}
-      {CATEGORY_ORDER.map((category) => {
+      {activeCategories.map((category) => {
         const metrics = groupedMetrics[category] || [];
         // Hide categories with no data
         if (metrics.length === 0) return null;
@@ -571,6 +826,60 @@ export default function DashboardPage() {
           </div>
         );
       })}
+
+      {/* Customize Metrics Modal */}
+      {showCustomize && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center"
+          onClick={(e) => { if (e.target === e.currentTarget) setShowCustomize(false); }}
+          role="dialog"
+          aria-modal="true"
+          aria-label="Customize dashboard metrics"
+        >
+          <div className="absolute inset-0 bg-black/40" />
+          <div className="relative w-full sm:w-[32rem] max-h-[80vh] mx-4 bg-white rounded-2xl shadow-2xl flex flex-col">
+            <div className="flex items-center justify-between px-6 pt-5 pb-3 border-b border-gray-100">
+              <h2 className="text-lg font-semibold text-gray-900">Customize Dashboard</h2>
+              <button
+                onClick={() => setShowCustomize(false)}
+                className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors cursor-pointer"
+                aria-label="Close"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto px-6 py-4">
+              <p className="text-xs text-gray-400 mb-3">
+                Tap a metric to add or remove it from your dashboard.
+                {customMetrics === null && editMetrics.length === DEFAULT_METRIC_NAMES.length && (
+                  <span className="ml-1">(showing defaults)</span>
+                )}
+              </p>
+              <MetricToggleList definitions={definitions} selected={editMetrics} onToggle={toggleMetric} />
+            </div>
+
+            <div className="flex items-center justify-between px-6 py-4 border-t border-gray-100">
+              <button
+                onClick={revertToDefault}
+                disabled={saving}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium text-gray-600 hover:bg-gray-100 transition-colors cursor-pointer disabled:opacity-50"
+              >
+                <RotateCcw className="h-3.5 w-3.5" />
+                Revert to Default
+              </button>
+              <button
+                onClick={saveCustomize}
+                disabled={saving}
+                className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 transition-colors cursor-pointer disabled:opacity-50"
+              >
+                {saving && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Detail Chart Modal */}
       {selectedMetric && (

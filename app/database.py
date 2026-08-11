@@ -76,3 +76,8 @@ async def init_db():
             """))
         except Exception:
             pass  # Table already exists
+        # Add dashboard_metrics column to users
+        try:
+            await conn.execute(text("ALTER TABLE users ADD COLUMN dashboard_metrics TEXT"))
+        except Exception:
+            pass  # Column already exists
