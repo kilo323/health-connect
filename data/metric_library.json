@@ -1,0 +1,1334 @@
+[
+  {
+    "name": "Glucose",
+    "category": "Metabolic",
+    "unit": "mg/dL",
+    "data_type": "float",
+    "description": "Blood sugar level",
+    "aliases": ["Glucose, Serum", "Blood Glucose", "Fasting Glucose", "GLUCOSE"],
+    "reference_ranges": [
+      {"sex": null, "low": 70, "high": 99, "source": "common"}
+    ],
+    "unit_conversions": {"mmol/L": 0.0555}
+  },
+  {
+    "name": "BUN",
+    "category": "Kidney Function",
+    "unit": "mg/dL",
+    "data_type": "float",
+    "description": "Blood Urea Nitrogen",
+    "aliases": ["Blood Urea Nitrogen", "BUN, Serum", "BUN (Blood Urea Nitrogen)", "Bun"],
+    "reference_ranges": [
+      {"sex": null, "low": 6, "high": 24, "source": "common"}
+    ],
+    "unit_conversions": {"mmol/L": 0.357}
+  },
+  {
+    "name": "Creatinine",
+    "category": "Kidney Function",
+    "unit": "mg/dL",
+    "data_type": "float",
+    "description": "Waste product filtered by kidneys",
+    "aliases": ["Creatinine, Serum", "Creat", "Crea", "Serum Creatinine", "CREATININE"],
+    "reference_ranges": [
+      {"sex": "male", "low": 0.76, "high": 1.27, "source": "common"},
+      {"sex": "female", "low": 0.57, "high": 1.11, "source": "common"}
+    ],
+    "unit_conversions": {"umol/L": 88.42}
+  },
+  {
+    "name": "eGFR",
+    "category": "Kidney Function",
+    "unit": "mL/min/1.73m2",
+    "data_type": "float",
+    "description": "Estimated Glomerular Filtration Rate",
+    "aliases": [
+      "eGFR (2021 CKD-EPI)", "eGFR If NonAfrican American",
+      "eGFR If African American", "eGFR, African American",
+      "eGFR, Non African American", "eGFR (CKD-EPI)"
+    ],
+    "reference_ranges": [
+      {"sex": null, "low": 60, "high": null, "operator": ">=", "source": "common"}
+    ],
+    "unit_conversions": {}
+  },
+  {
+    "name": "BUN/Creatinine Ratio",
+    "category": "Kidney Function",
+    "unit": "ratio",
+    "data_type": "float",
+    "description": "Ratio of BUN to Creatinine",
+    "aliases": ["Calc BUN/Creat", "BUN/Creat Ratio", "BUN/Creatinine Ratio", "Bun/Creatinine Ratio"],
+    "reference_ranges": [
+      {"sex": null, "low": 9, "high": 20, "source": "common"}
+    ],
+    "unit_conversions": {}
+  },
+  {
+    "name": "Sodium",
+    "category": "Electrolytes",
+    "unit": "mmol/L",
+    "data_type": "float",
+    "description": "Essential electrolyte",
+    "aliases": ["Sodium, Serum", "Na", "Sodium (Na)", "Na, Serum"],
+    "reference_ranges": [
+      {"sex": null, "low": 134, "high": 144, "source": "common"}
+    ],
+    "unit_conversions": {"mEq/L": 1, "MEQ/L": 1}
+  },
+  {
+    "name": "Potassium",
+    "category": "Electrolytes",
+    "unit": "mmol/L",
+    "data_type": "float",
+    "description": "Essential electrolyte",
+    "aliases": ["Potassium, Serum", "K", "Potassium (K)", "K, Serum"],
+    "reference_ranges": [
+      {"sex": null, "low": 3.5, "high": 5.2, "source": "common"}
+    ],
+    "unit_conversions": {"mEq/L": 1, "MEQ/L": 1}
+  },
+  {
+    "name": "Chloride",
+    "category": "Electrolytes",
+    "unit": "mmol/L",
+    "data_type": "float",
+    "description": "Essential electrolyte",
+    "aliases": ["Chloride, Serum", "Cl", "Chloride (Cl)", "Cl, Serum"],
+    "reference_ranges": [
+      {"sex": null, "low": 96, "high": 106, "source": "common"}
+    ],
+    "unit_conversions": {"mEq/L": 1, "MEQ/L": 1}
+  },
+  {
+    "name": "Carbon Dioxide",
+    "category": "Electrolytes",
+    "unit": "mmol/L",
+    "data_type": "float",
+    "description": "Total CO2 (bicarbonate)",
+    "aliases": ["CO2", "Carbon Dioxide, Serum", "Bicarbonate", "CO2, Serum", "Carbon Dioxide (CO2)", "Total CO2"],
+    "reference_ranges": [
+      {"sex": null, "low": 20, "high": 29, "source": "common"}
+    ],
+    "unit_conversions": {"mEq/L": 1}
+  },
+  {
+    "name": "Calcium",
+    "category": "Electrolytes",
+    "unit": "mg/dL",
+    "data_type": "float",
+    "description": "Essential mineral",
+    "aliases": ["Calcium, Serum", "Ca", "Calcium (Ca)"],
+    "reference_ranges": [
+      {"sex": null, "low": 8.5, "high": 10.5, "source": "common"}
+    ],
+    "unit_conversions": {"mmol/L": 0.25}
+  },
+  {
+    "name": "Total Protein",
+    "category": "Liver / Protein",
+    "unit": "g/dL",
+    "data_type": "float",
+    "description": "Total serum protein",
+    "aliases": ["Total Protein, Serum", "Protein, Total", "TP"],
+    "reference_ranges": [
+      {"sex": null, "low": 6.0, "high": 8.3, "source": "common"}
+    ],
+    "unit_conversions": {"g/L": 10}
+  },
+  {
+    "name": "Albumin",
+    "category": "Liver / Protein",
+    "unit": "g/dL",
+    "data_type": "float",
+    "description": "Major blood protein",
+    "aliases": ["Albumin, Serum", "ALB", "Albumin (Alb)"],
+    "reference_ranges": [
+      {"sex": null, "low": 3.5, "high": 5.5, "source": "common"}
+    ],
+    "unit_conversions": {"g/L": 10}
+  },
+  {
+    "name": "Globulin",
+    "category": "Liver / Protein",
+    "unit": "g/dL",
+    "data_type": "float",
+    "description": "Calculated globulin level",
+    "aliases": ["Globulin, Serum", "GLB"],
+    "reference_ranges": [
+      {"sex": null, "low": 1.5, "high": 4.5, "source": "common"}
+    ],
+    "unit_conversions": {}
+  },
+  {
+    "name": "A/G Ratio",
+    "category": "Liver / Protein",
+    "unit": "ratio",
+    "data_type": "float",
+    "description": "Albumin to Globulin ratio",
+    "aliases": ["Albumin/Globulin Ratio", "A/G"],
+    "reference_ranges": [
+      {"sex": null, "low": 1.1, "high": 2.5, "source": "common"}
+    ],
+    "unit_conversions": {}
+  },
+  {
+    "name": "Bilirubin, Total",
+    "category": "Liver Function",
+    "unit": "mg/dL",
+    "data_type": "float",
+    "description": "Total bilirubin",
+    "aliases": ["Total Bilirubin", "Bilirubin", "T. Bili", "Total Bilirubin, Serum"],
+    "reference_ranges": [
+      {"sex": null, "low": 0.1, "high": 1.2, "source": "common"}
+    ],
+    "unit_conversions": {"umol/L": 17.1}
+  },
+  {
+    "name": "Alkaline Phosphatase",
+    "category": "Liver Function",
+    "unit": "U/L",
+    "data_type": "float",
+    "description": "Liver/bone enzyme",
+    "aliases": ["ALP", "Alk Phos", "Alkaline Phosphatase, Serum", "ALP (Alkaline Phosphatase)"],
+    "reference_ranges": [
+      {"sex": null, "low": 44, "high": 147, "source": "common"}
+    ],
+    "unit_conversions": {"IU/L": 1}
+  },
+  {
+    "name": "AST",
+    "category": "Liver Function",
+    "unit": "U/L",
+    "data_type": "float",
+    "description": "Aspartate aminotransferase (liver enzyme)",
+    "aliases": ["AST (SGOT)", "SGOT", "Aspartate Aminotransferase", "AST, Serum"],
+    "reference_ranges": [
+      {"sex": null, "low": 10, "high": 40, "source": "common"}
+    ],
+    "unit_conversions": {"IU/L": 1}
+  },
+  {
+    "name": "ALT",
+    "category": "Liver Function",
+    "unit": "U/L",
+    "data_type": "float",
+    "description": "Alanine aminotransferase (liver enzyme)",
+    "aliases": ["ALT (SGPT)", "SGPT", "Alanine Aminotransferase", "ALT, Serum"],
+    "reference_ranges": [
+      {"sex": null, "low": 7, "high": 56, "source": "common"}
+    ],
+    "unit_conversions": {"IU/L": 1}
+  },
+  {
+    "name": "Uric Acid",
+    "category": "Kidney Function",
+    "unit": "mg/dL",
+    "data_type": "float",
+    "description": "Uric acid level (gout marker)",
+    "aliases": ["Uric Acid, Serum", "URIC ACID"],
+    "reference_ranges": [
+      {"sex": "male", "low": 3.7, "high": 8.6, "source": "common"},
+      {"sex": "female", "low": 2.6, "high": 6.0, "source": "common"}
+    ],
+    "unit_conversions": {"umol/L": 59.48}
+  },
+  {
+    "name": "Cholesterol",
+    "category": "Lipids",
+    "unit": "mg/dL",
+    "data_type": "float",
+    "description": "Total cholesterol",
+    "aliases": ["Total Cholesterol", "Cholesterol, Total", "T. Chol", "CHOLESTEROL"],
+    "reference_ranges": [
+      {"sex": null, "low": null, "high": 200, "operator": "<", "source": "common"}
+    ],
+    "unit_conversions": {"mmol/L": 0.0259}
+  },
+  {
+    "name": "Triglycerides",
+    "category": "Lipids",
+    "unit": "mg/dL",
+    "data_type": "float",
+    "description": "Blood fat level",
+    "aliases": ["Triglyceride", "TRIGLYCERIDES", "Triglycerides, Serum", "TG"],
+    "reference_ranges": [
+      {"sex": null, "low": null, "high": 150, "operator": "<", "source": "common"}
+    ],
+    "unit_conversions": {"mmol/L": 0.0113}
+  },
+  {
+    "name": "HDL Cholesterol",
+    "category": "Lipids",
+    "unit": "mg/dL",
+    "data_type": "float",
+    "description": "High-density lipoprotein cholesterol",
+    "aliases": ["HDL", "HDL-C", "Cholesterol, HDL", "HDL CHOLESTEROL"],
+    "reference_ranges": [
+      {"sex": "male", "low": 40, "high": null, "operator": ">=", "source": "common"},
+      {"sex": "female", "low": 50, "high": null, "operator": ">=", "source": "common"}
+    ],
+    "unit_conversions": {"mmol/L": 0.0259}
+  },
+  {
+    "name": "LDL Cholesterol",
+    "category": "Lipids",
+    "unit": "mg/dL",
+    "data_type": "float",
+    "description": "Low-density lipoprotein cholesterol",
+    "aliases": ["LDL", "LDL-C", "LDL Cholesterol Calculated", "Cholesterol, LDL", "LDL CHOLESTEROL", "LDL Chol Calc (NIH)"],
+    "reference_ranges": [
+      {"sex": null, "low": null, "high": 100, "operator": "<", "source": "common"}
+    ],
+    "unit_conversions": {"mmol/L": 0.0259}
+  },
+  {
+    "name": "VLDL Cholesterol",
+    "category": "Lipids",
+    "unit": "mg/dL",
+    "data_type": "float",
+    "description": "Very low-density lipoprotein cholesterol",
+    "aliases": ["VLDL Cholesterol Cal", "VLDL Cholesterol Calculated", "VLDL", "Cholesterol, VLDL"],
+    "reference_ranges": [
+      {"sex": null, "low": 5, "high": 40, "source": "common"}
+    ],
+    "unit_conversions": {"mmol/L": 0.0259}
+  },
+  {
+    "name": "Total Cholesterol/HDL Ratio",
+    "category": "Lipids",
+    "unit": "ratio",
+    "data_type": "float",
+    "description": "Total cholesterol to HDL ratio",
+    "aliases": ["T. Chol/HDL Ratio", "Total Cholesterol to HDL Ratio", "Chol/HDL Ratio", "TC/HDL Ratio"],
+    "reference_ranges": [
+      {"sex": null, "low": null, "high": 5.0, "operator": "<", "source": "common"}
+    ],
+    "unit_conversions": {}
+  },
+  {
+    "name": "Non-HDL Cholesterol",
+    "category": "Lipids",
+    "unit": "mg/dL",
+    "data_type": "float",
+    "description": "Non-HDL cholesterol (total minus HDL)",
+    "aliases": ["Non HDL Cholesterol", "Non-HDL", "Non-HDL Chol"],
+    "reference_ranges": [
+      {"sex": null, "low": null, "high": 130, "operator": "<", "source": "common"}
+    ],
+    "unit_conversions": {}
+  },
+  {
+    "name": "WBC",
+    "category": "CBC",
+    "unit": "10^3/uL",
+    "data_type": "float",
+    "description": "White blood cell count",
+    "aliases": [
+      "White Blood Cell Count (WBC)", "White Blood Cell Count", "WBC (White Blood Cell Count)",
+      "White Blood Cells", "Leukocytes", "WBC, CBC"
+    ],
+    "reference_ranges": [
+      {"sex": null, "low": 3.4, "high": 10.8, "source": "common"}
+    ],
+    "unit_conversions": {"K/UL": 1, "Thousand/uL": 1, "x10^3/uL": 1, "x10E3/uL": 1, "10*3/uL": 1}
+  },
+  {
+    "name": "RBC",
+    "category": "CBC",
+    "unit": "10^6/uL",
+    "data_type": "float",
+    "description": "Red blood cell count",
+    "aliases": [
+      "Red Blood Cell Count (RBC)", "Red Blood Cell Count", "Red Blood Cells",
+      "RBC (Red Blood Cell Count)", "Erythrocytes", "RBC, CBC"
+    ],
+    "reference_ranges": [
+      {"sex": "male", "low": 4.14, "high": 5.80, "source": "common"},
+      {"sex": "female", "low": 3.75, "high": 5.17, "source": "common"}
+    ],
+    "unit_conversions": {"Million/uL": 1, "x10^6/uL": 1, "x10E6/uL": 1, "10*6/uL": 1, "MILLION/UL": 1}
+  },
+  {
+    "name": "Hemoglobin",
+    "category": "CBC",
+    "unit": "g/dL",
+    "data_type": "float",
+    "description": "Oxygen-carrying protein in red blood cells",
+    "aliases": ["HGB", "Hemoglobin (Hgb)", "Hgb", "Hemoglobin, Blood", "HEMOGLOBIN"],
+    "reference_ranges": [
+      {"sex": "male", "low": 13.0, "high": 17.7, "source": "common"},
+      {"sex": "female", "low": 12.0, "high": 15.5, "source": "common"}
+    ],
+    "unit_conversions": {"g/L": 10}
+  },
+  {
+    "name": "Hematocrit",
+    "category": "CBC",
+    "unit": "%",
+    "data_type": "float",
+    "description": "Percentage of blood volume occupied by red blood cells",
+    "aliases": ["HCT", "Hematocrit (Hct)", "Hct", "HCT/Hematocrit", "HEMATOCRIT"],
+    "reference_ranges": [
+      {"sex": "male", "low": 37.5, "high": 51.0, "source": "common"},
+      {"sex": "female", "low": 35.5, "high": 44.9, "source": "common"}
+    ],
+    "unit_conversions": {}
+  },
+  {
+    "name": "MCV",
+    "category": "CBC",
+    "unit": "fL",
+    "data_type": "float",
+    "description": "Mean Corpuscular Volume — average red blood cell size",
+    "aliases": ["Mean Corpuscular Volume (MCV)", "Mean Corpuscular Volume", "MCV (Mean Corpuscular Volume)"],
+    "reference_ranges": [
+      {"sex": null, "low": 79, "high": 97, "source": "common"}
+    ],
+    "unit_conversions": {}
+  },
+  {
+    "name": "MCH",
+    "category": "CBC",
+    "unit": "pg",
+    "data_type": "float",
+    "description": "Mean Corpuscular Hemoglobin",
+    "aliases": ["Mean Corpuscular Hemoglobin (MCH)", "Mean Corpuscular Hemoglobin", "MCH (Mean Corpuscular Hemoglobin)"],
+    "reference_ranges": [
+      {"sex": null, "low": 26.6, "high": 33.0, "source": "common"}
+    ],
+    "unit_conversions": {}
+  },
+  {
+    "name": "MCHC",
+    "category": "CBC",
+    "unit": "g/dL",
+    "data_type": "float",
+    "description": "Mean Corpuscular Hemoglobin Concentration",
+    "aliases": ["Mean Corpuscular Hgb Conc (MCHC)", "Mean Corpuscular Hemoglobin Concentration", "MCHC (Mean Corpuscular Hgb Conc)"],
+    "reference_ranges": [
+      {"sex": null, "low": 31.5, "high": 35.7, "source": "common"}
+    ],
+    "unit_conversions": {}
+  },
+  {
+    "name": "RDW",
+    "category": "CBC",
+    "unit": "%",
+    "data_type": "float",
+    "description": "Red Cell Distribution Width",
+    "aliases": ["RDW-SD", "RDW-CV", "Red Cell Distribution Width", "RDW (Red Cell Distribution Width)"],
+    "reference_ranges": [
+      {"sex": null, "low": 12.3, "high": 15.4, "source": "common"}
+    ],
+    "unit_conversions": {}
+  },
+  {
+    "name": "Platelet Count",
+    "category": "CBC",
+    "unit": "10^3/uL",
+    "data_type": "float",
+    "description": "Number of platelets",
+    "aliases": ["Platelets", "PLT", "Platelet", "Platelet Count (PLT)", "PLATELET COUNT"],
+    "reference_ranges": [
+      {"sex": null, "low": 150, "high": 400, "source": "common"}
+    ],
+    "unit_conversions": {"K/UL": 1, "Thousand/uL": 1, "x10^3/uL": 1, "x10E3/uL": 1}
+  },
+  {
+    "name": "MPV",
+    "category": "CBC",
+    "unit": "fL",
+    "data_type": "float",
+    "description": "Mean Platelet Volume",
+    "aliases": ["Mean Platelet Volume", "MPV (Mean Platelet Volume)"],
+    "reference_ranges": [
+      {"sex": null, "low": 7.5, "high": 11.5, "source": "common"}
+    ],
+    "unit_conversions": {}
+  },
+  {
+    "name": "Neutrophils",
+    "category": "CBC",
+    "unit": "%",
+    "data_type": "float",
+    "description": "Percentage of neutrophils (white blood cells)",
+    "aliases": ["Neutrophils (%)", "Neutrophil %", "NEUT", "Neutrophils, Percent", "Segs"],
+    "reference_ranges": [
+      {"sex": null, "low": 40, "high": 70, "source": "common"}
+    ],
+    "unit_conversions": {}
+  },
+  {
+    "name": "Lymphocytes",
+    "category": "CBC",
+    "unit": "%",
+    "data_type": "float",
+    "description": "Percentage of lymphocytes",
+    "aliases": ["Lymphocytes (%)", "Lymphocyte %", "LYMPH", "Lymphocytes, Percent"],
+    "reference_ranges": [
+      {"sex": null, "low": 20, "high": 40, "source": "common"}
+    ],
+    "unit_conversions": {}
+  },
+  {
+    "name": "Monocytes",
+    "category": "CBC",
+    "unit": "%",
+    "data_type": "float",
+    "description": "Percentage of monocytes",
+    "aliases": ["Monocytes (%)", "Monocyte %", "MONO", "Monocytes, Percent"],
+    "reference_ranges": [
+      {"sex": null, "low": 2, "high": 8, "source": "common"}
+    ],
+    "unit_conversions": {}
+  },
+  {
+    "name": "Eosinophils",
+    "category": "CBC",
+    "unit": "%",
+    "data_type": "float",
+    "description": "Percentage of eosinophils",
+    "aliases": ["Eosinophils (%)", "Eosinophil %", "EOS", "Eosinophils, Percent"],
+    "reference_ranges": [
+      {"sex": null, "low": 1, "high": 4, "source": "common"}
+    ],
+    "unit_conversions": {}
+  },
+  {
+    "name": "Basophils",
+    "category": "CBC",
+    "unit": "%",
+    "data_type": "float",
+    "description": "Percentage of basophils",
+    "aliases": ["Basophils (%)", "Basophil %", "BASO", "Basophils, Percent"],
+    "reference_ranges": [
+      {"sex": null, "low": 0, "high": 1, "source": "common"}
+    ],
+    "unit_conversions": {}
+  },
+  {
+    "name": "Absolute Neutrophils",
+    "category": "CBC",
+    "unit": "10^3/uL",
+    "data_type": "float",
+    "description": "Absolute neutrophil count",
+    "aliases": ["Absolute Neutrophil Count", "ANC", "Neutrophils (Absolute)", "Abs Neutrophils"],
+    "reference_ranges": [
+      {"sex": null, "low": 1.5, "high": 8.0, "source": "common"}
+    ],
+    "unit_conversions": {}
+  },
+  {
+    "name": "Absolute Lymphocytes",
+    "category": "CBC",
+    "unit": "10^3/uL",
+    "data_type": "float",
+    "description": "Absolute lymphocyte count",
+    "aliases": ["Absolute Lymphocyte Count", "ALC", "Lymphocytes (Absolute)", "Abs Lymphocytes"],
+    "reference_ranges": [
+      {"sex": null, "low": 1.0, "high": 4.8, "source": "common"}
+    ],
+    "unit_conversions": {}
+  },
+  {
+    "name": "Absolute Monocytes",
+    "category": "CBC",
+    "unit": "10^3/uL",
+    "data_type": "float",
+    "description": "Absolute monocyte count",
+    "aliases": ["Absolute Monocyte Count", "Monocytes (Absolute)", "Abs Monocytes"],
+    "reference_ranges": [
+      {"sex": null, "low": 0.2, "high": 1.0, "source": "common"}
+    ],
+    "unit_conversions": {}
+  },
+  {
+    "name": "Absolute Eosinophils",
+    "category": "CBC",
+    "unit": "10^3/uL",
+    "data_type": "float",
+    "description": "Absolute eosinophil count",
+    "aliases": ["Absolute Eosinophil Count", "Eosinophils (Absolute)", "Abs Eosinophils"],
+    "reference_ranges": [
+      {"sex": null, "low": 0.0, "high": 0.5, "source": "common"}
+    ],
+    "unit_conversions": {}
+  },
+  {
+    "name": "Absolute Basophils",
+    "category": "CBC",
+    "unit": "10^3/uL",
+    "data_type": "float",
+    "description": "Absolute basophil count",
+    "aliases": ["Absolute Basophil Count", "Basophils (Absolute)", "Abs Basophils"],
+    "reference_ranges": [
+      {"sex": null, "low": 0.0, "high": 0.2, "source": "common"}
+    ],
+    "unit_conversions": {}
+  },
+  {
+    "name": "TSH",
+    "category": "Thyroid",
+    "unit": "uIU/mL",
+    "data_type": "float",
+    "description": "Thyroid Stimulating Hormone",
+    "aliases": ["TSH, Third Generation", "Thyroid Stimulating Hormone", "TSH (Thyroid Stimulating Hormone)"],
+    "reference_ranges": [
+      {"sex": null, "low": 0.45, "high": 4.5, "source": "common"}
+    ],
+    "unit_conversions": {"mIU/L": 1, "UIU/ML": 1}
+  },
+  {
+    "name": "Free T4",
+    "category": "Thyroid",
+    "unit": "ng/dL",
+    "data_type": "float",
+    "description": "Free Thyroxine",
+    "aliases": ["T4, Free", "Free T4 (Thyroxine)", "Free Thyroxine", "FT4", "T4 Free"],
+    "reference_ranges": [
+      {"sex": null, "low": 0.8, "high": 1.8, "source": "common"}
+    ],
+    "unit_conversions": {"pmol/L": 12.87}
+  },
+  {
+    "name": "Free T3",
+    "category": "Thyroid",
+    "unit": "pg/mL",
+    "data_type": "float",
+    "description": "Free Triiodothyronine",
+    "aliases": ["T3, Free", "Free T3 (Triiodothyronine)", "Free Triiodothyronine", "FT3", "T3 Free"],
+    "reference_ranges": [
+      {"sex": null, "low": 2.0, "high": 4.4, "source": "common"}
+    ],
+    "unit_conversions": {"pmol/L": 1.536}
+  },
+  {
+    "name": "Testosterone, Total",
+    "category": "Hormones",
+    "unit": "ng/dL",
+    "data_type": "float",
+    "description": "Total testosterone level",
+    "aliases": ["Testosterone", "Testosterone, Total, Males", "Total Testosterone", "TESTOSTERONE"],
+    "reference_ranges": [
+      {"sex": "male", "low": 264, "high": 916, "source": "common"},
+      {"sex": "female", "low": 8, "high": 60, "source": "common"}
+    ],
+    "unit_conversions": {"nmol/L": 0.0347, "ng/mL": 100}
+  },
+  {
+    "name": "Free Testosterone",
+    "category": "Hormones",
+    "unit": "pg/mL",
+    "data_type": "float",
+    "description": "Free (unbound) testosterone",
+    "aliases": ["Testosterone, Free", "Free Testosterone, Direct", "Free Testo"],
+    "reference_ranges": [
+      {"sex": "male", "low": 35, "high": 155, "source": "common"},
+      {"sex": "female", "low": 0.3, "high": 1.9, "source": "common"}
+    ],
+    "unit_conversions": {}
+  },
+  {
+    "name": "Estradiol",
+    "category": "Hormones",
+    "unit": "pg/mL",
+    "data_type": "float",
+    "description": "Primary estrogen hormone",
+    "aliases": ["E2", "Estradiol (E2)", "Oestradiol"],
+    "reference_ranges": [
+      {"sex": "male", "low": 0, "high": 47, "source": "common"},
+      {"sex": "female", "low": 15, "high": 350, "source": "common"}
+    ],
+    "unit_conversions": {"pmol/L": 3.671}
+  },
+  {
+    "name": "PSA",
+    "category": "Hormones",
+    "unit": "ng/mL",
+    "data_type": "float",
+    "description": "Prostate Specific Antigen",
+    "aliases": ["PSA, Total", "Prostate Specific Antigen (PSA)", "Total PSA", "PSA Total", "Prostate Specific Ag, Serum", "Prostate Specific Antigen, Serum"],
+    "reference_ranges": [
+      {"sex": "male", "low": 0, "high": 4.0, "operator": "<=", "source": "common"}
+    ],
+    "unit_conversions": {"ug/L": 1}
+  },
+  {
+    "name": "FSH",
+    "category": "Hormones",
+    "unit": "mIU/mL",
+    "data_type": "float",
+    "description": "Follicle Stimulating Hormone",
+    "aliases": ["Follicle Stimulating Hormone", "FSH (Follicle Stimulating Hormone)"],
+    "reference_ranges": [
+      {"sex": "male", "low": 1.27, "high": 19.26, "source": "common"},
+      {"sex": "female", "low": 3.5, "high": 12.5, "source": "common"}
+    ],
+    "unit_conversions": {"IU/L": 1}
+  },
+  {
+    "name": "LH",
+    "category": "Hormones",
+    "unit": "mIU/mL",
+    "data_type": "float",
+    "description": "Luteinizing Hormone",
+    "aliases": ["Luteinizing Hormone (LH)", "Luteinizing Hormone"],
+    "reference_ranges": [
+      {"sex": "male", "low": 1.24, "high": 8.62, "source": "common"},
+      {"sex": "female", "low": 2.4, "high": 12.6, "source": "common"}
+    ],
+    "unit_conversions": {"IU/L": 1}
+  },
+  {
+    "name": "DHEA-S",
+    "category": "Hormones",
+    "unit": "ug/dL",
+    "data_type": "float",
+    "description": "Dehydroepiandrosterone sulfate",
+    "aliases": ["DHEAS", "DHEA-Sulfate", "DHEA Sulfate", "DHEA-S, Serum"],
+    "reference_ranges": [
+      {"sex": "male", "low": 102, "high": 416, "source": "common"},
+      {"sex": "female", "low": 98, "high": 340, "source": "common"}
+    ],
+    "unit_conversions": {"umol/L": 0.002714}
+  },
+  {
+    "name": "SHBG",
+    "category": "Hormones",
+    "unit": "nmol/L",
+    "data_type": "float",
+    "description": "Sex Hormone Binding Globulin",
+    "aliases": ["Sex Hormone Binding Globulin", "SHBG (Sex Hormone Binding Globulin)"],
+    "reference_ranges": [
+      {"sex": "male", "low": 10, "high": 57, "source": "common"},
+      {"sex": "female", "low": 18, "high": 144, "source": "common"}
+    ],
+    "unit_conversions": {}
+  },
+  {
+    "name": "Hemoglobin A1c",
+    "category": "Diabetes",
+    "unit": "%",
+    "data_type": "float",
+    "description": "Average blood sugar over 2-3 months",
+    "aliases": ["A1c", "HbA1c", "Hgb A1c", "Glycated Hemoglobin", "Hemoglobin A1c (HbA1c)", "A1C"],
+    "reference_ranges": [
+      {"sex": null, "low": null, "high": 5.7, "operator": "<", "source": "common"}
+    ],
+    "unit_conversions": {"mmol/mol": 10.929}
+  },
+  {
+    "name": "Insulin",
+    "category": "Diabetes",
+    "unit": "uIU/mL",
+    "data_type": "float",
+    "description": "Fasting insulin level",
+    "aliases": ["Insulin, Fasting", "Fasting Insulin", "Insulin Level"],
+    "reference_ranges": [
+      {"sex": null, "low": 2.6, "high": 24.9, "source": "common"}
+    ],
+    "unit_conversions": {"pmol/L": 6.945}
+  },
+  {
+    "name": "Ferritin",
+    "category": "Iron",
+    "unit": "ng/mL",
+    "data_type": "float",
+    "description": "Iron storage protein",
+    "aliases": ["Ferritin, Serum", "FERRITIN"],
+    "reference_ranges": [
+      {"sex": "male", "low": 30, "high": 400, "source": "common"},
+      {"sex": "female", "low": 15, "high": 150, "source": "common"}
+    ],
+    "unit_conversions": {"ug/L": 1}
+  },
+  {
+    "name": "Iron",
+    "category": "Iron",
+    "unit": "ug/dL",
+    "data_type": "float",
+    "description": "Serum iron level",
+    "aliases": ["Iron, Serum", "Serum Iron", "IRON"],
+    "reference_ranges": [
+      {"sex": "male", "low": 65, "high": 175, "source": "common"},
+      {"sex": "female", "low": 50, "high": 170, "source": "common"}
+    ],
+    "unit_conversions": {"umol/L": 0.179}
+  },
+  {
+    "name": "TIBC",
+    "category": "Iron",
+    "unit": "ug/dL",
+    "data_type": "float",
+    "description": "Total Iron Binding Capacity",
+    "aliases": ["Total Iron Binding Capacity", "Iron Binding Capacity", "TIBC (Total Iron Binding Capacity)"],
+    "reference_ranges": [
+      {"sex": null, "low": 250, "high": 450, "source": "common"}
+    ],
+    "unit_conversions": {"umol/L": 0.179}
+  },
+  {
+    "name": "Vitamin D, 25-Hydroxy",
+    "category": "Vitamins",
+    "unit": "ng/mL",
+    "data_type": "float",
+    "description": "Vitamin D status",
+    "aliases": ["25-Hydroxyvitamin D", "Vitamin D", "25-OH Vitamin D", "Vit D", "25-Hydroxy Vitamin D"],
+    "reference_ranges": [
+      {"sex": null, "low": 30, "high": 100, "source": "common"}
+    ],
+    "unit_conversions": {"nmol/L": 2.496}
+  },
+  {
+    "name": "Vitamin B12",
+    "category": "Vitamins",
+    "unit": "pg/mL",
+    "data_type": "float",
+    "description": "Vitamin B12 level",
+    "aliases": ["B12", "Cyanocobalamin", "Vitamin B-12"],
+    "reference_ranges": [
+      {"sex": null, "low": 200, "high": 900, "source": "common"}
+    ],
+    "unit_conversions": {"pmol/L": 0.738}
+  },
+  {
+    "name": "CRP, High Sensitivity",
+    "category": "Inflammation",
+    "unit": "mg/L",
+    "data_type": "float",
+    "description": "High-sensitivity C-Reactive Protein (cardiac/inflammation marker)",
+    "aliases": ["hs-CRP", "High Sensitivity CRP", "CRP-HS", "Hs CRP", "Cardiac CRP"],
+    "reference_ranges": [
+      {"sex": null, "low": null, "high": 3.0, "operator": "<", "source": "common"}
+    ],
+    "unit_conversions": {}
+  },
+  {
+    "name": "Sed Rate",
+    "category": "Inflammation",
+    "unit": "mm/hr",
+    "data_type": "float",
+    "description": "Erythrocyte Sedimentation Rate",
+    "aliases": ["ESR", "Erythrocyte Sedimentation Rate", "Sedimentation Rate"],
+    "reference_ranges": [
+      {"sex": "male", "low": 0, "high": 15, "source": "common"},
+      {"sex": "female", "low": 0, "high": 20, "source": "common"}
+    ],
+    "unit_conversions": {}
+  },
+  {
+    "name": "Magnesium",
+    "category": "Electrolytes",
+    "unit": "mg/dL",
+    "data_type": "float",
+    "description": "Essential mineral",
+    "aliases": ["Magnesium, Serum", "Mg", "Magnesium (Mg)"],
+    "reference_ranges": [
+      {"sex": null, "low": 1.7, "high": 2.2, "source": "common"}
+    ],
+    "unit_conversions": {"mmol/L": 0.4114}
+  },
+  {
+    "name": "Phosphorus",
+    "category": "Electrolytes",
+    "unit": "mg/dL",
+    "data_type": "float",
+    "description": "Phosphate level",
+    "aliases": ["Phosphorus, Serum", "Phosphate", "Phos", "Phosphorus (Phos)"],
+    "reference_ranges": [
+      {"sex": null, "low": 2.5, "high": 4.5, "source": "common"}
+    ],
+    "unit_conversions": {"mmol/L": 0.3229}
+  },
+  {
+    "name": "Specific Gravity",
+    "category": "Urinalysis",
+    "unit": "ratio",
+    "data_type": "float",
+    "description": "Urine concentration measure",
+    "aliases": ["Urinalysis Specific Gravity", "Sp Grav", "SG", "Specific Gravity, Urine"],
+    "reference_ranges": [
+      {"sex": null, "low": 1.005, "high": 1.030, "source": "common"}
+    ],
+    "unit_conversions": {}
+  },
+  {
+    "name": "pH, Urine",
+    "category": "Urinalysis",
+    "unit": "pH",
+    "data_type": "float",
+    "description": "Urine acidity/alkalinity",
+    "aliases": ["pH", "Urine pH", "pH, Urine"],
+    "reference_ranges": [
+      {"sex": null, "low": 4.5, "high": 8.0, "source": "common"}
+    ],
+    "unit_conversions": {}
+  },
+  {
+    "name": "Weight",
+    "category": "Body Composition",
+    "unit": "lb",
+    "data_type": "float",
+    "description": "Body weight",
+    "aliases": ["Body Weight", "Weight (lbs)"],
+    "reference_ranges": [],
+    "unit_conversions": {"kg": 0.453592}
+  },
+  {
+    "name": "BMI",
+    "category": "Body Composition",
+    "unit": "kg/m2",
+    "data_type": "float",
+    "description": "Body Mass Index",
+    "aliases": ["Body Mass Index", "BMI (Body Mass Index)"],
+    "reference_ranges": [
+      {"sex": null, "low": 18.5, "high": 24.9, "source": "common"}
+    ],
+    "unit_conversions": {}
+  },
+  {
+    "name": "Body Fat Percentage",
+    "category": "Body Composition",
+    "unit": "%",
+    "data_type": "float",
+    "description": "Percentage of body weight that is fat",
+    "aliases": ["Body Fat %", "Body Fat", "Fat %", "Percent Body Fat"],
+    "reference_ranges": [
+      {"sex": "male", "low": 10, "high": 20, "source": "common"},
+      {"sex": "female", "low": 18, "high": 28, "source": "common"}
+    ],
+    "unit_conversions": {}
+  },
+  {
+    "name": "Body Fat Mass",
+    "category": "Body Composition",
+    "unit": "lb",
+    "data_type": "float",
+    "description": "Total fat mass in pounds",
+    "aliases": ["Fat Mass", "Total Body Fat"],
+    "reference_ranges": [],
+    "unit_conversions": {"kg": 0.453592}
+  },
+  {
+    "name": "Lean Body Mass",
+    "category": "Body Composition",
+    "unit": "lb",
+    "data_type": "float",
+    "description": "Total lean mass (muscle, organs, water)",
+    "aliases": ["Fat-Free Mass", "Lean Mass", "FFM"],
+    "reference_ranges": [],
+    "unit_conversions": {"kg": 0.453592}
+  },
+  {
+    "name": "Muscle Mass",
+    "category": "Body Composition",
+    "unit": "lb",
+    "data_type": "float",
+    "description": "Total muscle mass",
+    "aliases": ["Muscle Weight", "Skeletal Muscle Mass", "Muscle Weight/Mass"],
+    "reference_ranges": [],
+    "unit_conversions": {"kg": 0.453592}
+  },
+  {
+    "name": "Bone Mass",
+    "category": "Body Composition",
+    "unit": "lb",
+    "data_type": "float",
+    "description": "Total bone mass",
+    "aliases": ["Bone Mineral Content", "Bone Weight"],
+    "reference_ranges": [],
+    "unit_conversions": {"kg": 0.453592}
+  },
+  {
+    "name": "Basal Metabolic Rate",
+    "category": "Body Composition",
+    "unit": "kcal",
+    "data_type": "float",
+    "description": "Calories burned at rest",
+    "aliases": ["BMR", "Basal Metabolic Rate (BMR)"],
+    "reference_ranges": [],
+    "unit_conversions": {}
+  },
+  {
+    "name": "Visceral Fat Level",
+    "category": "Body Composition",
+    "unit": "level",
+    "data_type": "float",
+    "description": "Visceral fat rating",
+    "aliases": ["Visceral Fat", "Visceral Fat Area", "Visceral Fat Level/Area", "Visceral Fat Rating"],
+    "reference_ranges": [
+      {"sex": null, "low": 1, "high": 9, "source": "common"}
+    ],
+    "unit_conversions": {}
+  },
+  {
+    "name": "Body Water",
+    "category": "Body Composition",
+    "unit": "%",
+    "data_type": "float",
+    "description": "Total body water percentage",
+    "aliases": ["Total Body Water", "Body Water Percentage", "TBW"],
+    "reference_ranges": [
+      {"sex": "male", "low": 50, "high": 65, "source": "common"},
+      {"sex": "female", "low": 45, "high": 60, "source": "common"}
+    ],
+    "unit_conversions": {}
+  },
+  {
+    "name": "Waist-Hip Ratio",
+    "category": "Body Composition",
+    "unit": "ratio",
+    "data_type": "float",
+    "description": "Waist circumference divided by hip circumference",
+    "aliases": ["WHR", "Waist Hip Ratio"],
+    "reference_ranges": [
+      {"sex": "male", "low": null, "high": 0.90, "operator": "<", "source": "common"},
+      {"sex": "female", "low": null, "high": 0.85, "operator": "<", "source": "common"}
+    ],
+    "unit_conversions": {}
+  },
+  {
+    "name": "BMD Lumbar Spine",
+    "category": "DEXA",
+    "unit": "g/cm2",
+    "data_type": "float",
+    "description": "Bone Mineral Density - Lumbar Spine",
+    "aliases": ["BMD Spine", "Lumbar Spine BMD", "Bone Mineral Density (Lumbar)", "L1-L4 BMD"],
+    "reference_ranges": [
+      {"sex": null, "low": 0.9, "high": null, "operator": ">=", "source": "common"}
+    ],
+    "unit_conversions": {}
+  },
+  {
+    "name": "BMD Femoral Neck",
+    "category": "DEXA",
+    "unit": "g/cm2",
+    "data_type": "float",
+    "description": "Bone Mineral Density - Femoral Neck",
+    "aliases": ["BMD Hip", "Femoral Neck BMD", "Bone Mineral Density (Hip)"],
+    "reference_ranges": [
+      {"sex": null, "low": 0.8, "high": null, "operator": ">=", "source": "common"}
+    ],
+    "unit_conversions": {}
+  },
+  {
+    "name": "T-Score",
+    "category": "DEXA",
+    "unit": "SD",
+    "data_type": "float",
+    "description": "Standard deviations from peak bone mass",
+    "aliases": ["T Score", "T-Score (DEXA)", "Bone Density T-Score"],
+    "reference_ranges": [
+      {"sex": null, "low": -1.0, "high": null, "operator": ">=", "source": "common"}
+    ],
+    "unit_conversions": {}
+  },
+  {
+    "name": "Z-Score",
+    "category": "DEXA",
+    "unit": "SD",
+    "data_type": "float",
+    "description": "Standard deviations from age-matched mean",
+    "aliases": ["Z Score", "Z-Score (DEXA)", "Bone Density Z-Score"],
+    "reference_ranges": [
+      {"sex": null, "low": -2.0, "high": null, "operator": ">=", "source": "common"}
+    ],
+    "unit_conversions": {}
+  },
+  {
+    "name": "Protein/Creatinine Ratio",
+    "category": "Urinalysis",
+    "unit": "mg/g",
+    "data_type": "float",
+    "description": "Urine protein to creatinine ratio",
+    "aliases": ["Protein/Creat Ratio", "Urine Protein/Creat Ratio", "Urine PCR"],
+    "reference_ranges": [
+      {"sex": null, "low": 0, "high": 200, "source": "common"}
+    ],
+    "unit_conversions": {}
+  },
+  {
+    "name": "Creatinine, Urine",
+    "category": "Urinalysis",
+    "unit": "mg/dL",
+    "data_type": "float",
+    "description": "Urine creatinine concentration",
+    "aliases": ["Creatinine Concentration, Urine", "Urine Creatinine", "Creat, Urine"],
+    "reference_ranges": [],
+    "unit_conversions": {}
+  },
+  {
+    "name": "Protein, Urine",
+    "category": "Urinalysis",
+    "unit": "mg/dL",
+    "data_type": "float",
+    "description": "Urine protein concentration",
+    "aliases": ["Protein Concentration, Urine", "Urine Protein", "Protein, Random Urine"],
+    "reference_ranges": [
+      {"sex": null, "low": null, "high": 20, "operator": "<", "source": "common"}
+    ],
+    "unit_conversions": {}
+  },
+  {
+    "name": "Protein Mass",
+    "category": "Body Composition",
+    "unit": "lb",
+    "data_type": "float",
+    "description": "Total body protein mass",
+    "aliases": ["Protein", "Protein Weight"],
+    "reference_ranges": [],
+    "unit_conversions": {"kg": 0.453592}
+  },
+  {
+    "name": "Cologuard Result",
+    "category": "Screening",
+    "unit": "result",
+    "data_type": "string",
+    "description": "Cologuard colorectal cancer screening result",
+    "aliases": ["Cologuard Test Result", "Cologuard"],
+    "reference_ranges": [],
+    "unit_conversions": {}
+  },
+  {
+    "name": "GGT",
+    "category": "Liver Function",
+    "unit": "U/L",
+    "data_type": "float",
+    "description": "Gamma-Glutamyl Transferase — liver/bile duct enzyme",
+    "aliases": ["GGT (Gamma-Glutamyl Transferase)", "Gamma-Glutamyl Transferase", "GGTP"],
+    "reference_ranges": [
+      {"sex": "male", "low": 8, "high": 61, "source": "common"},
+      {"sex": "female", "low": 5, "high": 36, "source": "common"}
+    ],
+    "unit_conversions": {"IU/L": 1}
+  },
+  {
+    "name": "Urobilinogen",
+    "category": "Urinalysis",
+    "unit": "mg/dL",
+    "data_type": "float",
+    "description": "Urobilinogen level in urine",
+    "aliases": ["Urobilinogen, Urine"],
+    "reference_ranges": [
+      {"sex": null, "low": 0.2, "high": 1.0, "source": "common"}
+    ],
+    "unit_conversions": {}
+  },
+  {
+    "name": "Calculated LDL Cholesterol",
+    "category": "Lipids",
+    "unit": "mg/dL",
+    "data_type": "float",
+    "description": "LDL Cholesterol (calculated)",
+    "aliases": ["Calculated LDL", "LDL Calculated", "LDL Chol Calc"],
+    "reference_ranges": [
+      {"sex": null, "low": null, "high": 100, "operator": "<", "source": "common"}
+    ],
+    "unit_conversions": {"mmol/L": 0.0259}
+  },
+  {
+    "name": "LDL/HDL Ratio",
+    "category": "Lipids",
+    "unit": "ratio",
+    "data_type": "float",
+    "description": "LDL to HDL cholesterol ratio",
+    "aliases": ["Risk Ratio LDL/HDL", "LDL/HDL"],
+    "reference_ranges": [
+      {"sex": null, "low": null, "high": 3.5, "operator": "<", "source": "common"}
+    ],
+    "unit_conversions": {}
+  },
+  {
+    "name": "Globulin, Total",
+    "category": "Liver / Protein",
+    "unit": "g/dL",
+    "data_type": "float",
+    "description": "Total globulin calculated",
+    "aliases": ["Calc Globulin", "Globulin (Calc)"],
+    "reference_ranges": [
+      {"sex": null, "low": 1.5, "high": 4.5, "source": "common"}
+    ],
+    "unit_conversions": {}
+  },
+  {
+    "name": "A/G Ratio",
+    "category": "Liver / Protein",
+    "unit": "ratio",
+    "data_type": "float",
+    "description": "Albumin to Globulin ratio",
+    "aliases": ["Calc A/G Ratio", "A/G Ratio (Calc)", "Albumin/Globulin Ratio"],
+    "reference_ranges": [
+      {"sex": null, "low": 1.1, "high": 2.5, "source": "common"}
+    ],
+    "unit_conversions": {}
+  },
+  {
+    "name": "Nucleated RBCs",
+    "category": "CBC",
+    "unit": "10^3/uL",
+    "data_type": "float",
+    "description": "Nucleated red blood cell count",
+    "aliases": ["Absolute Nucleated RBCs", "NRBC", "NRBCs"],
+    "reference_ranges": [
+      {"sex": null, "low": 0, "high": 0.01, "source": "common"}
+    ],
+    "unit_conversions": {}
+  },
+  {
+    "name": "Immature Granulocytes",
+    "category": "CBC",
+    "unit": "%",
+    "data_type": "float",
+    "description": "Percentage of immature granulocytes",
+    "aliases": ["Immature Granulocyte, %", "IG%", "IG (%)"],
+    "reference_ranges": [
+      {"sex": null, "low": 0, "high": 2, "source": "common"}
+    ],
+    "unit_conversions": {}
+  },
+  {
+    "name": "Absolute Immature Granulocytes",
+    "category": "CBC",
+    "unit": "10^3/uL",
+    "data_type": "float",
+    "description": "Absolute immature granulocyte count",
+    "aliases": ["Immature Granulocyte, Absolute", "IG (Absolute)", "Abs IG"],
+    "reference_ranges": [
+      {"sex": null, "low": 0, "high": 0.06, "source": "common"}
+    ],
+    "unit_conversions": {}
+  },
+  {
+    "name": "eGFR",
+    "category": "Kidney Function",
+    "unit": "mL/min/1.73m2",
+    "data_type": "float",
+    "description": "Estimated Glomerular Filtration Rate",
+    "aliases": ["GFR, Estimated", "Estimated GFR", "GFR"],
+    "reference_ranges": [
+      {"sex": null, "low": 60, "high": null, "operator": ">=", "source": "common"}
+    ],
+    "unit_conversions": {}
+  },
+  {
+    "name": "Right Arm Fat",
+    "category": "Body Composition - Segmental",
+    "unit": "lb",
+    "data_type": "float",
+    "description": "Fat mass in right arm",
+    "aliases": [],
+    "reference_ranges": [],
+    "unit_conversions": {"kg": 0.453592}
+  },
+  {
+    "name": "Left Arm Fat",
+    "category": "Body Composition - Segmental",
+    "unit": "lb",
+    "data_type": "float",
+    "description": "Fat mass in left arm",
+    "aliases": [],
+    "reference_ranges": [],
+    "unit_conversions": {"kg": 0.453592}
+  },
+  {
+    "name": "Trunk Fat",
+    "category": "Body Composition - Segmental",
+    "unit": "lb",
+    "data_type": "float",
+    "description": "Fat mass in trunk",
+    "aliases": [],
+    "reference_ranges": [],
+    "unit_conversions": {"kg": 0.453592}
+  },
+  {
+    "name": "Right Leg Fat",
+    "category": "Body Composition - Segmental",
+    "unit": "lb",
+    "data_type": "float",
+    "description": "Fat mass in right leg",
+    "aliases": [],
+    "reference_ranges": [],
+    "unit_conversions": {"kg": 0.453592}
+  },
+  {
+    "name": "Left Leg Fat",
+    "category": "Body Composition - Segmental",
+    "unit": "lb",
+    "data_type": "float",
+    "description": "Fat mass in left leg",
+    "aliases": [],
+    "reference_ranges": [],
+    "unit_conversions": {"kg": 0.453592}
+  },
+  {
+    "name": "Right Arm Muscle",
+    "category": "Body Composition - Segmental",
+    "unit": "lb",
+    "data_type": "float",
+    "description": "Muscle mass in right arm",
+    "aliases": [],
+    "reference_ranges": [],
+    "unit_conversions": {"kg": 0.453592}
+  },
+  {
+    "name": "Left Arm Muscle",
+    "category": "Body Composition - Segmental",
+    "unit": "lb",
+    "data_type": "float",
+    "description": "Muscle mass in left arm",
+    "aliases": [],
+    "reference_ranges": [],
+    "unit_conversions": {"kg": 0.453592}
+  },
+  {
+    "name": "Trunk Muscle",
+    "category": "Body Composition - Segmental",
+    "unit": "lb",
+    "data_type": "float",
+    "description": "Muscle mass in trunk",
+    "aliases": [],
+    "reference_ranges": [],
+    "unit_conversions": {"kg": 0.453592}
+  },
+  {
+    "name": "Right Leg Muscle",
+    "category": "Body Composition - Segmental",
+    "unit": "lb",
+    "data_type": "float",
+    "description": "Muscle mass in right leg",
+    "aliases": [],
+    "reference_ranges": [],
+    "unit_conversions": {"kg": 0.453592}
+  },
+  {
+    "name": "Left Leg Muscle",
+    "category": "Body Composition - Segmental",
+    "unit": "lb",
+    "data_type": "float",
+    "description": "Muscle mass in left leg",
+    "aliases": [],
+    "reference_ranges": [],
+    "unit_conversions": {"kg": 0.453592}
+  },
+  {
+    "name": "Subcutaneous Fat",
+    "category": "Body Composition",
+    "unit": "lb",
+    "data_type": "float",
+    "description": "Subcutaneous fat mass",
+    "aliases": [],
+    "reference_ranges": [],
+    "unit_conversions": {"kg": 0.453592}
+  },
+  {
+    "name": "Fitness Score",
+    "category": "Body Composition",
+    "unit": "score",
+    "data_type": "float",
+    "description": "Overall fitness score",
+    "aliases": [],
+    "reference_ranges": [],
+    "unit_conversions": {}
+  }
+]

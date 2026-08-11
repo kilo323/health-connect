@@ -1,8 +1,12 @@
 # local dev
 uploads/
-data/
+data/*
 00-sample-docs/
 certs/
+
+# specific includes
+!data/llm_prompt.md
+!data/metric_library.json
 
 # Python / Backend
 .venv/
