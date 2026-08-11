@@ -17,16 +17,23 @@ npm run dev &
 
 # Start uvicorn with hot-reload in the foreground
 # Run from /app (not /) so the watcher doesn't scan the entire filesystem tree.
-# Use --reload-exclude to skip frontend/node_modules/.next even if they're in the tree.
-cd /app
+# NOTE: --reload-dir only accepts *directories* (passing files like main.py makes
+# watchfiles fall back to watching all of /app). Watching /app/data is what caused
+# the 100% CPU: the SQLite DB changes on every request, triggering constant reloads.
+# Run from / so the mounted /app directory IS the "app" Python package (the code
+# uses relative imports, so it must be loaded as a package). Watch /app (for
+# top-level files like main.py, config.py, database.py) plus the Python source
+# subdirs, but exclude the heavy dirs (frontend/node_modules, .next, data) that
+# caused both the reload loop and the 100% CPU.
+cd /
 exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload \
+    --reload-dir /app \
     --reload-dir /app/routers \
     --reload-dir /app/services \
     --reload-dir /app/models \
     --reload-dir /app/schemas \
-    --reload-dir /app/main.py \
-    --reload-dir /app/config.py \
-    --reload-dir /app/database.py \
-    --reload-dir /app/data \
-    --reload-exclude "frontend/node_modules" \
-    --reload-exclude "frontend/.next"
+    --reload-exclude "frontend/*" \
+    --reload-exclude "data/*" \
+    --reload-exclude "*/node_modules/*" \
+    --reload-exclude "*/.next/*" \
+    --reload-exclude "*/__pycache__/*"

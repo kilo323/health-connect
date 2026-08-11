@@ -32,10 +32,17 @@ services:
       # Signal Next.js to use dev server instead of static export
       - NODE_ENV=development
       # File watching mode for uvicorn/Next.js inside Docker.
-      # Set to "true" only if hot-reload doesn't work without it (some
-      # Windows/macOS Docker Desktop setups need polling, but it's CPU-heavy).
-      - WATCHFILES_FORCE_POLLING=${WATCHFILES_FORCE_POLLING:-false}
-      - WATCHPACK_POLLING=${WATCHPACK_POLLING:-false}
+      # Only set WATCHFILES_FORCE_POLLING=true / WATCHPACK_POLLING=true if
+      # hot-reload doesn't work at all — polling a Windows bind mount is the
+      # main cause of 100% CPU. Any non-empty value is treated as "on", so
+      # these default to empty (disabled).
+      - WATCHFILES_FORCE_POLLING=${WATCHFILES_FORCE_POLLING:-}
+      - WATCHPACK_POLLING=${WATCHPACK_POLLING:-}
+      # Narrow watchpack's scope so it doesn't poll node_modules / .next
+      - WATCHPACK_WATCHER_LIMIT=2000
+      # Make the `app` package importable regardless of uvicorn's CWD/sys.path
+      # handling (fixes "No module named app" when reload excludes are set).
+      - PYTHONPATH=/app
       # Point Python (httpx/certifi) at the system CA bundle that includes
       # any corporate certs registered by update-ca-certificates
       - SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
