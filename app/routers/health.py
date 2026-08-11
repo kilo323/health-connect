@@ -161,6 +161,36 @@ async def list_all_metrics(
     ]
 
 
+@router.get("/metrics/definitions", response_model=List[MetricDefinitionResponse])
+async def get_metric_definitions(
+    db: AsyncSession = Depends(get_db),
+):
+    """List all metric definitions with reference ranges"""
+    result = await db.execute(select(MetricDefinition).order_by(MetricDefinition.name))
+    return result.scalars().all()
+
+
+@router.post("/metrics/definitions", response_model=MetricDefinitionResponse, status_code=status.HTTP_201_CREATED)
+async def create_health_metric_definition(
+    definition_data: MetricDefinitionCreate,
+    db: AsyncSession = Depends(get_db),
+):
+    """Create a new metric definition (admin only)"""
+    new_definition = MetricDefinition(
+        name=definition_data.name,
+        category=definition_data.category,
+        unit=definition_data.unit,
+        data_type=definition_data.data_type,
+        description=definition_data.description
+    )
+    
+    db.add(new_definition)
+    await db.commit()
+    await db.refresh(new_definition)
+    
+    return new_definition
+
+
 @router.get("/metrics/{metric_type}", response_model=List[HealthMetricResponse])
 async def get_metrics(
     metric_type: str,
@@ -1460,41 +1490,6 @@ async def batch_progress(job_id: int, current_user: UserResponse = Depends(get_c
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
         },
-    )
-
-
-@router.get("/metrics/definitions", response_model=List[MetricDefinitionResponse])
-async def list_metric_definitions():
-    """List all metric definitions with reference ranges"""
-    db = await next(get_db())
-    result = await db.execute(select(MetricDefinition).order_by(MetricDefinition.name))
-    return result.scalars().all()
-
-
-@router.post("/metrics/definitions", response_model=MetricDefinitionResponse, status_code=status.HTTP_201_CREATED)
-async def create_metric_definition(definition_data: MetricDefinitionCreate):
-    """Create a new metric definition (admin only)"""
-    db = await next(get_db())
-    
-    new_definition = MetricDefinition(
-        name=definition_data.name,
-        category=definition_data.category,
-        unit=definition_data.unit,
-        data_type=definition_data.data_type,
-        description=definition_data.description
-    )
-    
-    db.add(new_definition)
-    await db.commit()
-    await db.refresh(new_definition)
-    
-    return MetricDefinitionResponse(
-        id=new_definition.id,
-        name=new_definition.name,
-        category=new_definition.category,
-        unit=new_definition.unit,
-        data_type=new_definition.data_type,
-        description=new_definition.description
     )
 
 
