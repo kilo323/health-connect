@@ -122,6 +122,85 @@ and configured through the admin UI:
 4. The account must have a Google Health / Fitbit profile — sign into the Fitbit mobile
    app with the same Google account once, otherwise sync reports "not linked".
 
+### After the initial Google sync
+
+Once a user has connected their Google Health account and the first sync has run,
+a few one-time follow-up steps are needed to keep data flowing automatically.
+
+#### 1. Enable the sync schedule (admin)
+
+The scheduler is **disabled** by default. The admin enables cron-triggered
+incremental syncs:
+
+- Go to **Admin → Schedule**, toggle **Enabled**, and set a cron expression
+  (default `0 2 * * *` = daily at 2 AM UTC), then **Save**.
+- The backend (`PUT /api/admin/settings/schedule`) stores the config and
+  restarts the `AsyncIOScheduler` job.
+
+Common cron values:
+
+| Cadence                    | Expression      |
+|----------------------------|-----------------|
+| Daily at 2 AM UTC          | `0 2 * * *`    |
+| Every 6 hours              | `0 */6 * * *`  |
+| Weekly on Sunday at 3 AM   | `0 3 * * 0`    |
+| Every weekday at midnight   | `0 0 * * 1-5`  |
+
+You can trigger an immediate sync via **Admin → Sync Now**
+(`POST /admin/sync/now`), useful after changing settings.
+
+#### 2. Configure per-user sync settings
+
+Each user controls how far back their *first* sync reaches via
+`sync_days_back` (default 7, range 1–365). Set it before the first scheduled
+run via **Settings → Sync Settings** or `PUT /api/health/sync/settings`
+with `{"sync_days_back": N}`.
+
+Subsequent runs only fetch data since the last successful sync (with a
+1-day overlap to catch late-arriving points). The scheduler stores the
+watermark per-user under `sync_settings_{id}.last_google_sync`.
+
+> To backfill more history later, increase `sync_days_back` and either clear
+> `last_google_sync` (via the admin DB) or trigger **Admin → Sync Now** —
+> idempotency is enforced by a `(user_id, metric_type, recorded_at, source)`
+> unique constraint, so duplicates are skipped.
+
+#### 3. (Optional) Enable webhook push notifications
+
+For a publicly deployed instance, register push notifications to avoid polling
+the Google Health API on a fixed schedule. The webhook receiver lives at
+`POST /api/webhooks/google-health` (see `app/routers/webhooks.py`).
+
+1. Set `WEBHOOK_SECRET` in `.env` to a strong random string — without it,
+   the endpoint returns 404 and webhooks stay disabled.
+2. Set `GOOGLE_CLOUD_PROJECT_NUMBER` to your GCP project **number**
+   (not the project ID — Google returns 400/403 otherwise).
+3. Install `google-auth` (script-only dependency) and run the one-time
+   subscriber registration:
+
+   ```powershell
+   pip install google-auth
+   $env:GOOGLE_APPLICATION_CREDENTIALS = "C:\path\to\service-account.json"
+   .\.venv\Scripts\python.exe .\register_google_health_subscriber.py `
+       --project-number 123456789012 `
+       --endpoint https://your-domain.com/api/webhooks/google-health `
+       --secret "Bearer $WEBHOOK_SECRET"
+   ```
+
+   This registers `subscriptionCreatePolicy: AUTOMATIC` for all 13 synced
+   data types, so notifications start flowing for any consenting user
+   without per-user subscription calls. Registration triggers Google's
+   two-step verification handshake against the endpoint, which must already
+   be running, reachable over HTTPS (TLS 1.2+), and returning 200 for
+   authorized verification POSTs / 401 for unauthorized ones.
+
+For local dev, expose the backend through a tunnel (ngrok / cloudflared)
+and pass that URL to `--endpoint`. The webhook handler acks with 204 and
+processes notifications asynchronously; the
+`google_health_uid_{healthUserId}` mapping written during the OAuth
+callback (`app/routers/health.py` → `google_health_callback`) is used to
+route notifications to the correct local user.
+
 ### Nextcloud (per-user) setup
 
 Each user enters their Nextcloud server URL, username and an app password under
