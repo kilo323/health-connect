@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.dev
-    container_name: health-tracker-dev
+    container_name: health-connect-dev
     ports:
       - "3000:3000"
       - "8000:8000"

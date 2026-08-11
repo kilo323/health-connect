@@ -2,7 +2,7 @@ services:
   app:
     build:
       context: .
-    container_name: health-tracker
+    container_name: health-connect
     restart: unless-stopped
     ports:
       - "3000:3000"
