@@ -217,7 +217,20 @@ def call_llm(config: dict[str, str], prompt: str) -> str:
 
     print(f"Calling LLM: {config['model']} at {base_url}/chat/completions ...")
 
-    with httpx.Client(timeout=120.0) as client:
+    # SSL verification: set LLM_SSL_VERIFY=false to skip, or a path to a CA bundle
+    dotenv = load_dotenv(ROOT / ".env")
+    ssl_verify = (
+        os.environ.get("LLM_SSL_VERIFY")
+        or dotenv.get("LLM_SSL_VERIFY", "true")
+    ).strip()
+    if ssl_verify.lower() in ("false", "0", "no"):
+        verify = False
+    elif ssl_verify.lower() in ("true", "1", "yes", ""):
+        verify = True
+    else:
+        verify = ssl_verify  # treat as CA bundle path
+
+    with httpx.Client(timeout=120.0, verify=verify) as client:
         response = client.post(
             f"{base_url}/chat/completions",
             headers=headers,

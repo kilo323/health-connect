@@ -4,11 +4,11 @@ import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { useAuthStore } from '@/store/auth-store';
-import { 
-  LayoutDashboard, 
-  Activity, 
-  FileText, 
-  Settings, 
+import {
+  LayoutDashboard,
+  Activity,
+  FileText,
+  Settings,
   LogOut,
   Stethoscope,
   Database,
@@ -16,7 +16,8 @@ import {
   Users,
   LinkIcon,
   BarChart3,
-  TestTube2
+  TestTube2,
+  UserCircle
 } from 'lucide-react';
 
 const navigation = [
@@ -25,6 +26,7 @@ const navigation = [
   { name: 'Health Data', href: '/health-data', icon: Activity },
   { name: 'Documents', href: '/documents', icon: FileText },
   { name: 'Pending Analysis', href: '/pending-analysis', icon: Stethoscope },
+  { name: 'Profile', href: '/profile', icon: UserCircle },
   { name: 'Settings', href: '/settings', icon: Settings },
 ];
 

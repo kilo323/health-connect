@@ -9,6 +9,7 @@ import {
   TrendingUp, TrendingDown, Minus, CheckCircle, AlertTriangle, X,
 } from 'lucide-react';
 import apiClient from '@/lib/api-client';
+import { useUnitConversion } from '@/hooks/useUnitConversion';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   ReferenceLine, ReferenceArea,
@@ -190,11 +191,15 @@ function DetailChart({
   definition,
   timeSeries,
   summary,
+  convert,
+  formatMetricDisplay,
 }: {
   name: string;
   definition?: MetricDefinition;
   timeSeries: TimeSeriesPoint[];
   summary?: MetricSummary;
+  convert: (metricName: string, value: number, unit: string) => { value: number; unit: string };
+  formatMetricDisplay: (value: number | null, unit: string) => string;
 }) {
   if (timeSeries.length === 0) {
     return (
@@ -204,11 +209,23 @@ function DetailChart({
     );
   }
 
+  // Convert time series values to preferred unit
+  const convertedSeries = timeSeries.map((p) => {
+    const c = convert(name, p.value, p.unit);
+    return { ...p, value: Math.round(c.value * 100) / 100, unit: c.unit };
+  });
+  const displayUnit = convertedSeries[0]?.unit || summary?.unit || '';
+
   const { low, high } = definition ? getDefaultRange(definition) : { low: null, high: null };
-  const values = timeSeries.map((p) => p.value);
+  const values = convertedSeries.map((p) => p.value);
   const min = Math.min(...values);
   const max = Math.max(...values);
   const padding = (max - min) * 0.2 || 5;
+
+  // Convert summary latest value
+  const convertedDisplay = summary
+    ? convert(name, summary.latest_value, summary.unit)
+    : null;
 
   return (
     <div>
@@ -218,14 +235,14 @@ function DetailChart({
         </div>
         {summary && (
           <div className="text-right">
-            <span className="text-2xl font-bold text-gray-900">{summary.latest_value}</span>
-            <span className="text-sm text-gray-500 ml-1">{summary.unit}</span>
+            <span className="text-2xl font-bold text-gray-900">{convertedDisplay ? formatMetricDisplay(convertedDisplay.value, convertedDisplay.unit) : '—'}</span>
+            <span className="text-sm text-gray-500 ml-1">{displayUnit}</span>
           </div>
         )}
       </div>
 
       <ResponsiveContainer width="100%" height={320}>
-        <LineChart data={timeSeries} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
+        <LineChart data={convertedSeries} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
           <XAxis
             dataKey="date"
@@ -244,7 +261,7 @@ function DetailChart({
               const d = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
               return d.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
             }}
-            formatter={(value: any) => [`${value} ${definition?.unit || ''}`, name]}
+            formatter={(value: any) => [`${value} ${displayUnit}`, name]}
           />
           {low != null && (
             <ReferenceLine y={low} stroke="#ef4444" strokeDasharray="6 4" strokeWidth={1}
@@ -268,10 +285,11 @@ function DetailChart({
 // ── List Row Component ───────────────────────────────────────────────────────
 
 function ListRow({
-  name, description, value, unit, trend, trendPct, trendData,
+  name, description, value, unit, formattedValue, trend, trendPct, trendData,
   refLow, refHigh, selected, onClick,
 }: {
   name: string; description?: string; value: number | null; unit: string;
+  formattedValue?: string;
   trend: 'up' | 'down' | 'flat' | null; trendPct: number | null;
   trendData: number[]; refLow: number | null; refHigh: number | null;
   selected: boolean; onClick: () => void;
@@ -300,7 +318,7 @@ function ListRow({
         {description && <p className="text-xs text-gray-500 truncate">{description}</p>}
       </div>
       <div className="text-right flex-shrink-0 w-24">
-        <span className={`text-lg font-bold tabular-nums ${sc.text}`}>{formatValue(value)}</span>
+        <span className={`text-lg font-bold tabular-nums ${sc.text}`}>{formattedValue ?? formatValue(value)}</span>
         <span className="text-xs text-gray-500 ml-1">{unit}</span>
         {refLow != null && refHigh != null && <p className="text-xs text-gray-400">{refLow}–{refHigh}</p>}
       </div>
@@ -333,6 +351,7 @@ export default function DashboardPage() {
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
   const [collapsedCategories, setCollapsedCategories] = useState<Set<string>>(new Set());
   const [period, setPeriod] = useState<number>(0);
+  const { convert, formatValue: formatMetricDisplay, getDisplayUnit, loaded: unitsLoaded } = useUnitConversion();
 
   useEffect(() => { loadData(); }, [period]);
 
@@ -364,6 +383,7 @@ export default function DashboardPage() {
     const groups: Record<string, Array<{
       config: MetricConfig; definition?: MetricDefinition; summary?: MetricSummary;
       trendData: number[]; refLow: number | null; refHigh: number | null;
+      displayValue: number | null; displayUnit: string; formattedDisplay: string;
     }>> = {};
     for (const cat of CATEGORY_ORDER) groups[cat] = [];
     for (const config of CORE_METRICS) {
@@ -373,11 +393,21 @@ export default function DashboardPage() {
       if (!summary) continue;
       const ts = findTimeSeries(config.name, reportData?.time_series || {});
       const { low, high } = def ? getDefaultRange(def) : { low: null, high: null };
-      groups[config.category].push({ config, definition: def, summary, trendData: ts.map((p) => p.value), refLow: low, refHigh: high });
+
+      // Convert values to preferred unit
+      const converted = convert(config.name, summary.latest_value, summary.unit);
+      const convertedTrendData = ts.map((p) => Math.round(convert(config.name, p.value, p.unit).value * 100) / 100);
+
+      groups[config.category].push({
+        config, definition: def, summary,
+        trendData: convertedTrendData, refLow: low, refHigh: high,
+        displayValue: converted.value, displayUnit: converted.unit,
+        formattedDisplay: formatMetricDisplay(converted.value, converted.unit),
+      });
     }
     for (const cat of CATEGORY_ORDER) groups[cat].sort((a, b) => a.config.priority - b.config.priority);
     return groups;
-  }, [definitions, reportData]);
+  }, [definitions, reportData, convert, formatMetricDisplay]);
 
   const healthSummary = useMemo(() => {
     let total = 0, normal = 0, borderline = 0, outOfRange = 0;
@@ -511,8 +541,9 @@ export default function DashboardPage() {
                   {metrics.map((m) => (
                     <MetricCard key={m.config.name} name={m.config.name}
                       description={m.definition?.description || undefined}
-                      value={m.summary?.latest_value ?? null}
-                      unit={m.summary?.unit || m.definition?.unit || ''}
+                      value={m.displayValue}
+                      unit={m.displayUnit}
+                      formattedValue={m.formattedDisplay}
                       recordedAt={m.summary?.recorded_at}
                       date={m.summary?.date}
                       trend={m.summary?.trend ?? null} trendPct={m.summary?.trend_pct ?? null}
@@ -526,8 +557,9 @@ export default function DashboardPage() {
                   {metrics.map((m) => (
                     <ListRow key={m.config.name} name={m.config.name}
                       description={m.definition?.description || undefined}
-                      value={m.summary?.latest_value ?? null}
-                      unit={m.summary?.unit || m.definition?.unit || ''}
+                      value={m.displayValue}
+                      unit={m.displayUnit}
+                      formattedValue={m.formattedDisplay}
                       trend={m.summary?.trend ?? null} trendPct={m.summary?.trend_pct ?? null}
                       trendData={m.trendData} refLow={m.refLow} refHigh={m.refHigh}
                       selected={selectedMetric === m.config.name}
@@ -574,7 +606,9 @@ export default function DashboardPage() {
               <DetailChart name={selectedMetric}
                 definition={findDefinition(selectedMetric, definitions)}
                 timeSeries={findTimeSeries(selectedMetric, reportData?.time_series || {})}
-                summary={findSummary(selectedMetric, reportData?.summary || [])} />
+                summary={findSummary(selectedMetric, reportData?.summary || [])}
+                convert={convert}
+                formatMetricDisplay={formatMetricDisplay} />
             </div>
           </div>
         </div>

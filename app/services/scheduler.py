@@ -1,16 +1,133 @@
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 import asyncio
 import logging
+from datetime import datetime, timezone
 
 from ..database import async_session_factory
 from ..models.settings import ScheduleConfig, AppSettings
 from ..models.health_data import DocumentStatus
-from ..services.google_health import GoogleHealthService
+from ..services.google_health import GoogleHealthService, NOT_LINKED_MARKER
 from ..services.nextcloud import NextcloudService
 
 logger = logging.getLogger(__name__)
+
+# Internal data type names synced from the Google Health API v4.
+# (blood_pressure, bmr, speed have no v4 equivalent and were dropped.)
+SYNC_DATA_TYPES = [
+    "steps", "heart_rate", "sleep", "weight", "distance",
+    "blood_glucose", "body_temperature",
+    "oxygen_saturation", "body_fat_percentage", "height",
+    "heart_minutes", "move_minutes",
+]
+
+UNIT_MAP = {
+    "steps": "count",
+    "heart_rate": "bpm",
+    "sleep": "minutes",
+    "weight": "kg",
+    "distance": "meters",
+    "blood_glucose": "mg/dL",
+    "body_temperature": "°C",
+    "oxygen_saturation": "%",
+    "body_fat_percentage": "%",
+    "height": "meters",
+    "heart_minutes": "minutes",
+    "move_minutes": "minutes",
+}
+
+# Reverse of GoogleHealthService.DATA_TYPE_MAP (v4 kebab-case -> internal name)
+API_TYPE_TO_INTERNAL = {
+    "steps": "steps",
+    "heart-rate": "heart_rate",
+    "sleep": "sleep",
+    "weight": "weight",
+    "blood-glucose": "blood_glucose",
+    "core-body-temperature": "body_temperature",
+    "distance": "distance",
+    "total-calories": "calories",
+    "daily-oxygen-saturation": "oxygen_saturation",
+    "body-fat": "body_fat_percentage",
+    "height": "height",
+    "active-zone-minutes": "heart_minutes",
+    "active-minutes": "move_minutes",
+}
+
+
+async def sync_health_data(user_id: int, start_time, end_time, data_types: list[str] | None = None) -> int:
+    """Fetch health data from the Google Health API and persist HealthMetric rows.
+
+    Shared by the polling scheduler and the webhook handler. Idempotency relies
+    on the (user_id, metric_type, recorded_at, source) unique constraint on
+    HealthMetric — duplicate inserts are skipped on IntegrityError.
+
+    Returns the number of new rows saved.
+    """
+    from ..models.health_data import HealthMetric
+
+    google_service = GoogleHealthService()
+    types_to_sync = data_types or SYNC_DATA_TYPES
+    total_saved = 0
+
+    account_not_linked = False
+    for data_type in types_to_sync:
+        if account_not_linked:
+            break  # every type fails identically once the account is unlinked
+        try:
+            health_data = await google_service.fetch_health_data(
+                user_id=user_id,
+                data_type=data_type,
+                start_time=start_time,
+                end_time=end_time,
+            )
+
+            if not health_data:
+                continue
+
+            async with async_session_factory() as db:
+                saved_count = 0
+                for point in health_data:
+                    try:
+                        extracted = HealthSyncScheduler._extract_v4_point(data_type, point)
+                        if not extracted:
+                            continue
+                        value, recorded_at = extracted
+
+                        db.add(HealthMetric(
+                            user_id=user_id,
+                            metric_type=data_type,
+                            value=value,
+                            unit=UNIT_MAP.get(data_type, "unknown"),
+                            recorded_at=recorded_at,
+                            source="google_health_connect",
+                        ))
+                        await db.commit()
+                        saved_count += 1
+                    except IntegrityError:
+                        await db.rollback()  # duplicate — already synced
+                    except Exception:
+                        await db.rollback()
+                        continue
+
+                total_saved += saved_count
+                if saved_count > 0:
+                    logger.info(f"Saved {saved_count} {data_type} records for user {user_id}")
+
+        except Exception as e:
+            if NOT_LINKED_MARKER in str(e):
+                account_not_linked = True
+                logger.warning(
+                    f"User {user_id}'s Google account is not linked to Google Health. "
+                    "To link it: open the Fitbit mobile app, sign in with this Google account, "
+                    "and complete setup. Skipping remaining data types for this user."
+                )
+            else:
+                logger.warning(f"Error syncing {data_type} for user {user_id}: {e}")
+            continue
+
+    return total_saved
 
 
 class HealthSyncScheduler:
@@ -55,8 +172,137 @@ class HealthSyncScheduler:
             self.is_running = False
             logger.info("Health sync scheduler stopped")
 
+    @staticmethod
+    def _extract_v4_point(data_type: str, point: dict):
+        """Extract (value, recorded_at) from a Google Health API v4 DataPoint.
+
+        Returns None when the point carries no usable value (e.g. a steps
+        "true zero" record, which omits the count field).
+
+        Notes on v4 units (all conversions applied here):
+          - int64 fields are serialized as JSON strings ("2038")
+          - distance is millimeters, weight is grams, height is millimeters
+          - sleep duration is computed as interval endTime - startTime
+        """
+        # Internal name -> v4 DataPoint union field (camelCase)
+        union_field_map = {
+            "steps": "steps",
+            "heart_rate": "heartRate",
+            "sleep": "sleep",
+            "weight": "weight",
+            "distance": "distance",
+            "calories": "totalCalories",
+            "blood_glucose": "bloodGlucose",
+            "body_temperature": "coreBodyTemperature",
+            "oxygen_saturation": "dailyOxygenSaturation",
+            "body_fat_percentage": "bodyFat",
+            "height": "height",
+            "heart_minutes": "activeZoneMinutes",
+            "move_minutes": "activeMinutes",
+        }
+        union_field = union_field_map.get(data_type)
+        if not union_field:
+            return None
+
+        payload = point.get(union_field)
+        if not payload:
+            return None
+
+        interval = payload.get("interval", {})
+        sample_time = payload.get("sampleTime", {})
+
+        # Session types (sleep): duration in minutes from interval bounds
+        if data_type == "sleep":
+            start_str = interval.get("startTime")
+            end_str = interval.get("endTime")
+            if not start_str or not end_str:
+                return None
+            try:
+                start_dt = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
+                end_dt = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+            return (end_dt - start_dt).total_seconds() / 60, start_dt
+
+        # Interval types: timestamp from interval.startTime
+        if data_type == "steps":
+            if "count" not in payload:  # true zero: device worn, no steps recorded
+                return None
+            value = float(payload["count"])
+            ts_str = interval.get("startTime")
+        elif data_type == "distance":
+            if "millimeters" not in payload:
+                return None
+            value = float(payload["millimeters"]) / 1000.0  # mm -> meters
+            ts_str = interval.get("startTime")
+        elif data_type == "heart_minutes":
+            if "activeZoneMinutes" not in payload:
+                return None
+            value = float(payload["activeZoneMinutes"])
+            ts_str = interval.get("startTime")
+        elif data_type == "move_minutes":
+            entries = payload.get("activeMinutesByActivityLevel", [])
+            value = sum(float(e.get("activeMinutes", 0)) for e in entries)
+            ts_str = interval.get("startTime")
+        # Daily types: timestamp from civil date (UTC midnight)
+        elif data_type == "oxygen_saturation":
+            if "averagePercentage" not in payload:
+                return None
+            value = float(payload["averagePercentage"])
+            date_info = payload.get("date", {})
+            if not date_info:
+                return None
+            ts_str = None
+            recorded_at = datetime(
+                date_info.get("year", 1970), date_info.get("month", 1), date_info.get("day", 1),
+                tzinfo=timezone.utc,
+            )
+        # Sample types: timestamp from sampleTime.physicalTime
+        elif data_type == "heart_rate":
+            if "beatsPerMinute" not in payload:
+                return None
+            value = float(payload["beatsPerMinute"])
+            ts_str = sample_time.get("physicalTime")
+        elif data_type == "weight":
+            if "weightGrams" not in payload:
+                return None
+            value = float(payload["weightGrams"]) / 1000.0  # g -> kg
+            ts_str = sample_time.get("physicalTime")
+        elif data_type == "blood_glucose":
+            if "bloodGlucoseMilligramsPerDeciliter" not in payload:
+                return None
+            value = float(payload["bloodGlucoseMilligramsPerDeciliter"])
+            ts_str = sample_time.get("physicalTime")
+        elif data_type == "body_temperature":
+            if "temperatureCelsius" not in payload:
+                return None
+            value = float(payload["temperatureCelsius"])
+            ts_str = sample_time.get("physicalTime")
+        elif data_type == "body_fat_percentage":
+            if "percentage" not in payload:
+                return None
+            value = float(payload["percentage"])
+            ts_str = sample_time.get("physicalTime")
+        elif data_type == "height":
+            if "heightMillimeters" not in payload:
+                return None
+            value = float(payload["heightMillimeters"]) / 1000.0  # mm -> meters
+            ts_str = sample_time.get("physicalTime")
+        else:
+            return None
+
+        if data_type != "oxygen_saturation":
+            if not ts_str:
+                return None
+            try:
+                recorded_at = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+
+        return value, recorded_at
+
     async def _run_sync(self):
-        """Main sync job - fetch data from Google Fit and store in Nextcloud"""
+        """Main sync job - fetch data from Google Health API and store locally"""
         logger.info("Starting health sync job...")
 
         try:
@@ -83,33 +329,6 @@ class HealthSyncScheduler:
             if not user_ids:
                 logger.info("No users with Google tokens found, finishing sync job")
                 return
-
-            google_service = GoogleHealthService()
-
-            data_types = [
-                "steps", "heart_rate", "sleep", "weight", "distance", "calories",
-                "blood_pressure", "blood_glucose", "body_temperature",
-                "oxygen_saturation", "body_fat_percentage", "height",
-                "heart_minutes", "move_minutes", "bmr", "speed",
-            ]
-            unit_map = {
-                "steps": "count",
-                "heart_rate": "bpm",
-                "sleep": "ms",
-                "weight": "kg",
-                "distance": "meters",
-                "calories": "kcal",
-                "blood_pressure": "mmHg",
-                "blood_glucose": "mg/dL",
-                "body_temperature": "°C",
-                "oxygen_saturation": "%",
-                "body_fat_percentage": "%",
-                "height": "meters",
-                "heart_minutes": "Heart Points",
-                "move_minutes": "minutes",
-                "bmr": "kcal/day",
-                "speed": "m/s",
-            }
 
             for user_id in user_ids:
                 # Load per-user sync settings
@@ -145,63 +364,7 @@ class HealthSyncScheduler:
 
                 logger.info(f"Syncing user {user_id}: {start_time.isoformat()} to {end_time.isoformat()} (days_back={sync_days_back})")
 
-                for data_type in data_types:
-                    try:
-                        health_data = await google_service.fetch_health_data(
-                            user_id=user_id,
-                            data_type=data_type,
-                            start_time=start_time,
-                            end_time=end_time,
-                        )
-
-                        if not health_data:
-                            continue
-
-                        # Store data points in the local database
-                        async with async_session_factory() as db:
-                            from ..models.health_data import HealthMetric
-                            from datetime import datetime, timezone
-
-                            saved_count = 0
-                            for point in health_data:
-                                try:
-                                    # Google Fit data points have fpVal or intVal
-                                    values = point.get("value", [])
-                                    if not values:
-                                        continue
-
-                                    val_obj = values[0]
-                                    if "fpVal" in val_obj:
-                                        value = val_obj["fpVal"]
-                                    elif "intVal" in val_obj:
-                                        value = float(val_obj["intVal"])
-                                    else:
-                                        continue
-
-                                    # Convert nanosecond timestamp to datetime
-                                    ts_ns = int(point.get("startTimeNanos", 0))
-                                    recorded_at = datetime.fromtimestamp(ts_ns / 1e9, tz=timezone.utc)
-
-                                    metric = HealthMetric(
-                                        user_id=user_id,
-                                        metric_type=data_type,
-                                        value=value,
-                                        unit=unit_map.get(data_type, "unknown"),
-                                        recorded_at=recorded_at,
-                                        source="google_fit",
-                                    )
-                                    db.add(metric)
-                                    saved_count += 1
-                                except Exception:
-                                    continue
-
-                            await db.commit()
-                            if saved_count > 0:
-                                logger.info(f"Saved {saved_count} {data_type} records for user {user_id}")
-
-                    except Exception as e:
-                        logger.warning(f"Error syncing {data_type} for user {user_id}: {e}")
-                        continue
+                await sync_health_data(user_id, start_time, end_time)
 
                 # Update last_google_sync for this user
                 try:

@@ -7,7 +7,7 @@ from sqlalchemy import select
 
 from .config import settings
 from .database import engine, init_db, async_session_factory
-from .routers import auth, health, users, admin
+from .routers import auth, health, users, admin, webhooks
 from .services.scheduler import scheduler
 from .models.settings import ScheduleConfig
 
@@ -154,3 +154,4 @@ app.include_router(auth.router, prefix="/api")
 app.include_router(health.router, prefix="/api")
 app.include_router(users.router, prefix="/api/users")
 app.include_router(admin.router, prefix="/api")
+app.include_router(webhooks.router, prefix="/api")

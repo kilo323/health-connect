@@ -1,14 +1,21 @@
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from passlib.context import CryptContext
 from jose import jwt, JWTError
+from difflib import SequenceMatcher
+import json
 import os
 from typing import List
 
 from ..database import get_db, async_session_factory
-from ..models.user import User, Role
-from ..schemas.auth import UserCreate, UserUpdate, UserResponse, LoginResponse
+from ..models.user import User, Role, UserUnitPreference
+from ..models.health_data import MetricDefinition
+from ..schemas.auth import (
+    UserCreate, UserUpdate, UserResponse, LoginResponse,
+    ProfileUpdate, PasswordChange, UnitPreferenceSet, UnitPreferenceResponse,
+    MetricSearchResult,
+)
 
 router = APIRouter(tags=["Users"])
 
@@ -72,6 +79,239 @@ async def me(current_user: User = Depends(get_current_active_user)):
         is_active=current_user.is_active,
         created_at=current_user.created_at
     )
+
+
+def _available_units(definition: MetricDefinition) -> list[str]:
+    """Return all displayable units for a metric definition.
+
+    The canonical unit plus every unit listed in unit_conversions keys.
+    """
+    units: list[str] = []
+    if definition.unit:
+        units.append(definition.unit)
+    if definition.unit_conversions:
+        try:
+            conversions = json.loads(definition.unit_conversions)
+            if isinstance(conversions, dict):
+                for u in conversions.keys():
+                    if u and u not in units:
+                        units.append(u)
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return units
+
+
+@router.put("/me", response_model=UserResponse)
+async def update_profile(
+    profile_data: ProfileUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Update the current user's own profile (email)."""
+    if profile_data.email:
+        result = await db.execute(
+            select(User).where(User.email == profile_data.email, User.id != current_user.id)
+        )
+        if result.scalar_one_or_none():
+            raise HTTPException(status_code=409, detail="Email already in use")
+
+    current_user.email = profile_data.email
+    db.add(current_user)
+    await db.commit()
+    await db.refresh(current_user)
+
+    return UserResponse(
+        id=current_user.id,
+        username=current_user.username,
+        email=current_user.email,
+        role=current_user.role.value if isinstance(current_user.role, Role) else current_user.role,
+        is_active=current_user.is_active,
+        created_at=current_user.created_at,
+    )
+
+
+@router.put("/me/password")
+async def change_password(
+    password_data: PasswordChange,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Change the current user's password."""
+    pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+    if not pwd_context.verify(password_data.current_password.encode("utf-8")[:72], current_user.hashed_password):
+        raise HTTPException(status_code=400, detail="Current password is incorrect")
+
+    if len(password_data.new_password) < 6:
+        raise HTTPException(status_code=400, detail="New password must be at least 6 characters")
+
+    current_user.hashed_password = pwd_context.hash(password_data.new_password.encode("utf-8")[:72])
+    db.add(current_user)
+    await db.commit()
+
+    return {"message": "Password updated successfully"}
+
+
+@router.get("/me/unit-preferences", response_model=list[UnitPreferenceResponse])
+async def get_unit_preferences(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """List the current user's unit preferences."""
+    result = await db.execute(
+        select(UserUnitPreference, MetricDefinition)
+        .join(MetricDefinition, UserUnitPreference.metric_definition_id == MetricDefinition.id)
+        .where(UserUnitPreference.user_id == current_user.id)
+        .order_by(MetricDefinition.name)
+    )
+    rows = result.all()
+    return [
+        UnitPreferenceResponse(
+            id=pref.id,
+            metric_definition_id=pref.metric_definition_id,
+            metric_name=defn.name,
+            canonical_unit=defn.unit,
+            preferred_unit=pref.preferred_unit,
+        )
+        for pref, defn in rows
+    ]
+
+
+@router.put("/me/unit-preferences")
+async def set_unit_preference(
+    pref: UnitPreferenceSet,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Set or update the preferred display unit for a metric definition."""
+    # Validate the metric definition exists
+    result = await db.execute(
+        select(MetricDefinition).where(MetricDefinition.id == pref.metric_definition_id)
+    )
+    definition = result.scalar_one_or_none()
+    if not definition:
+        raise HTTPException(status_code=404, detail="Metric definition not found")
+
+    # Validate the unit is available for this metric
+    available = _available_units(definition)
+    if pref.preferred_unit not in available:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unit '{pref.preferred_unit}' is not available for '{definition.name}'. Available: {available}",
+        )
+
+    # Upsert
+    result = await db.execute(
+        select(UserUnitPreference).where(
+            UserUnitPreference.user_id == current_user.id,
+            UserUnitPreference.metric_definition_id == pref.metric_definition_id,
+        )
+    )
+    existing = result.scalar_one_or_none()
+    if existing:
+        existing.preferred_unit = pref.preferred_unit
+    else:
+        db.add(UserUnitPreference(
+            user_id=current_user.id,
+            metric_definition_id=pref.metric_definition_id,
+            preferred_unit=pref.preferred_unit,
+        ))
+    await db.commit()
+
+    return {"message": f"Preference set: {definition.name} -> {pref.preferred_unit}"}
+
+
+@router.delete("/me/unit-preferences/{metric_definition_id}")
+async def delete_unit_preference(
+    metric_definition_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Remove a unit preference (revert to canonical unit)."""
+    result = await db.execute(
+        select(UserUnitPreference).where(
+            UserUnitPreference.user_id == current_user.id,
+            UserUnitPreference.metric_definition_id == metric_definition_id,
+        )
+    )
+    pref = result.scalar_one_or_none()
+    if not pref:
+        raise HTTPException(status_code=404, detail="Preference not found")
+
+    await db.delete(pref)
+    await db.commit()
+    return {"message": "Preference removed"}
+
+
+@router.get("/me/unit-preferences/search", response_model=list[MetricSearchResult])
+async def search_metrics_for_units(
+    q: str = Query(default="", description="Search query for metric name"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Fuzzy search metric definitions and return their available units with current preference."""
+    # Get all definitions that have unit conversions (i.e., units to choose from)
+    result = await db.execute(select(MetricDefinition).order_by(MetricDefinition.name))
+    all_defs = result.scalars().all()
+
+    # Get user's current preferences
+    pref_result = await db.execute(
+        select(UserUnitPreference).where(UserUnitPreference.user_id == current_user.id)
+    )
+    user_prefs = {p.metric_definition_id: p.preferred_unit for p in pref_result.scalars().all()}
+
+    # Build results with fuzzy matching
+    query_lower = q.strip().lower()
+    scored: list[tuple[float, MetricDefinition]] = []
+
+    for d in all_defs:
+        units = _available_units(d)
+        if len(units) < 2:
+            continue  # Skip metrics with only one unit — nothing to choose
+
+        name_lower = d.name.lower()
+        # Also match against aliases
+        aliases: list[str] = []
+        if d.aliases:
+            try:
+                parsed = json.loads(d.aliases)
+                if isinstance(parsed, list):
+                    aliases = [a.lower() for a in parsed if isinstance(a, str)]
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        if not query_lower:
+            scored.append((1.0, d))
+            continue
+
+        # Exact or substring match
+        if query_lower in name_lower:
+            scored.append((1.0, d))
+            continue
+        if any(query_lower in a for a in aliases):
+            scored.append((0.95, d))
+            continue
+
+        # Fuzzy match on name
+        best = SequenceMatcher(None, query_lower, name_lower).ratio()
+        for alias in aliases:
+            best = max(best, SequenceMatcher(None, query_lower, alias).ratio())
+
+        if best >= 0.5:
+            scored.append((best, d))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+
+    return [
+        MetricSearchResult(
+            id=d.id,
+            name=d.name,
+            category=d.category,
+            canonical_unit=d.unit,
+            available_units=_available_units(d),
+            preferred_unit=user_prefs.get(d.id),
+        )
+        for _, d in scored[:20]
+    ]
 
 
 @router.post("", response_model=UserResponse, status_code=status.HTTP_201_CREATED)

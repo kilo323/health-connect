@@ -8,6 +8,8 @@ export interface MetricCardProps {
   description?: string;
   value: number | null;
   unit: string;
+  formattedValue?: string; // Pre-formatted display string (e.g., "5'9\"" for compound units)
+  displayUnit?: string; // Override unit display (e.g., "" to hide unit for compound units)
   recordedAt?: string;
   date?: string; // "YYYY-MM-DD" format, displayed as-is without timezone conversion
   trend: 'up' | 'down' | 'flat' | null;
@@ -152,6 +154,8 @@ export default function MetricCard({
   description,
   value,
   unit,
+  formattedValue,
+  displayUnit,
   recordedAt,
   date,
   trend,
@@ -167,6 +171,8 @@ export default function MetricCard({
   const statusColor = getStatusColor(status);
   const sparkColor = getSparklineColor(status);
   const rangeText = formatRange(referenceLow, referenceHigh, unit);
+  const displayValue = formattedValue ?? formatMetricValue(value);
+  const showUnit = displayUnit ?? unit;
 
   return (
     <div
@@ -205,9 +211,9 @@ export default function MetricCard({
       {/* Value */}
       <div className="flex items-baseline gap-1.5 pl-2 mb-1">
         <span className={`text-2xl font-bold tabular-nums ${statusColor}`}>
-          {formatMetricValue(value)}
+          {displayValue}
         </span>
-        <span className="text-sm text-gray-500">{unit}</span>
+        {showUnit && <span className="text-sm text-gray-500">{showUnit}</span>}
       </div>
 
       {/* Range */}

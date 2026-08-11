@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react';
 import AuthLayout from '@/components/AuthLayout';
 import { Plus, Trash2, Download, Search, Activity, Filter } from 'lucide-react';
 import apiClient from '@/lib/api-client';
+import { useUnitConversion } from '@/hooks/useUnitConversion';
 
 interface HealthMetric {
   id: number;
@@ -20,21 +21,6 @@ const METRIC_TYPES = [
   'cholesterol', 'temperature', 'spo2', 'sleep_hours', 'steps'
 ];
 
-// Convert kg to lbs for weight display
-function formatValue(metric: HealthMetric): string {
-  if (metric.metric_type === 'weight' && metric.unit === 'kg') {
-    return (metric.value * 2.20462).toFixed(1);
-  }
-  return metric.value.toString();
-}
-
-function formatUnit(metric: HealthMetric): string {
-  if (metric.metric_type === 'weight' && metric.unit === 'kg') {
-    return 'lbs';
-  }
-  return metric.unit;
-}
-
 export default function HealthDataPage() {
   const [metrics, setMetrics] = useState<HealthMetric[]>([]);
   const [loading, setLoading] = useState(true);
@@ -43,6 +29,19 @@ export default function HealthDataPage() {
   const [filterYear, setFilterYear] = useState<string>('all');
   const [filterMetricType, setFilterMetricType] = useState<string>('all');
   const [availableTypes, setAvailableTypes] = useState<string[]>([]);
+  const { convert, formatValue: formatMetricDisplay, loaded: unitsLoaded } = useUnitConversion();
+
+  // Convert a metric value to the user's preferred display unit
+  function formatValue(metric: HealthMetric): string {
+    if (!unitsLoaded) return metric.value.toString();
+    const c = convert(metric.metric_type, metric.value, metric.unit);
+    return formatMetricDisplay(c.value, c.unit);
+  }
+
+  function formatUnit(metric: HealthMetric): string {
+    if (!unitsLoaded) return metric.unit;
+    return convert(metric.metric_type, metric.value, metric.unit).unit;
+  }
   
   // Add form state
   const [metricType, setMetricType] = useState(METRIC_TYPES[0]);

@@ -15,6 +15,7 @@ export default function SettingsPage() {
   const [error, setError] = useState('');
   const [googleConfigured, setGoogleConfigured] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
+  const [googleAccountLinked, setGoogleAccountLinked] = useState<boolean | null>(null);
 
   // Nextcloud state
   const [nextcloudUrl, setNextcloudUrl] = useState('');
@@ -30,8 +31,14 @@ export default function SettingsPage() {
   const [syncSettingsLoading, setSyncSettingsLoading] = useState(false);
   const [syncSettingsSaved, setSyncSettingsSaved] = useState(false);
 
-  // Load current settings on mount
+  // Load current settings on mount; pick up the not-linked flag when
+  // returning from the Google OAuth redirect.
   useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('google_account_linked') === 'false') {
+      setGoogleAccountLinked(false);
+      window.history.replaceState({}, '', window.location.pathname);
+    }
     loadSettings();
   }, []);
 
@@ -45,6 +52,9 @@ export default function SettingsPage() {
       ]);
 
       setGoogleConnected(googleStatusRes.data?.is_linked || false);
+      if (googleStatusRes.data?.account_linked !== null && googleStatusRes.data?.account_linked !== undefined) {
+        setGoogleAccountLinked(googleStatusRes.data.account_linked);
+      }
       setGoogleConfigured(googleConfigRes.data?.is_configured || false);
       setSyncDaysBack(syncSettingsRes.data?.sync_days_back ?? 7);
       setLastGoogleSync(syncSettingsRes.data?.last_google_sync ?? null);
@@ -186,8 +196,15 @@ export default function SettingsPage() {
           )}
 
           <p className="text-gray-600 mb-4">
-            Connect your Google account to sync health and fitness data from Google Fit.
+            Connect your Google account to sync health and fitness data via the Google Health API (Fitbit, Pixel Watch, and other Google health sources).
           </p>
+
+          <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 mb-4 flex items-start gap-2">
+            <AlertCircle className="h-4 w-4 text-amber-600 mt-0.5 shrink-0" />
+            <p className="text-sm text-amber-700">
+              If you linked your account before the Google Health API migration, disconnect and reconnect — previously granted Google Fit permissions no longer work.
+            </p>
+          </div>
 
           <div className="border border-gray-200 rounded-lg p-4">
             {googleConnected ? (
@@ -229,6 +246,16 @@ export default function SettingsPage() {
                   {googleLoading && <Loader2 className="h-4 w-4 animate-spin" />}
                   Connect Google Account
                 </button>
+              </div>
+            )}
+
+            {googleConnected && googleAccountLinked === false && (
+              <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 mt-3 flex items-start gap-2">
+                <AlertCircle className="h-4 w-4 text-amber-600 mt-0.5 shrink-0" />
+                <p className="text-sm text-amber-700">
+                  <span className="font-medium">Connected, but no Google Health data available.</span>{' '}
+                  This Google account isn't linked to Google Health yet. Open the Fitbit mobile app, sign in with this Google account, and complete setup — then data will sync automatically.
+                </p>
               </div>
             )}
           </div>

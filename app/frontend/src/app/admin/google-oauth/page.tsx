@@ -67,7 +67,7 @@ export default function AdminGoogleOAuthPage() {
 
         <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-6">
           <p className="text-sm text-blue-700">
-            Create a project in the <a href="https://console.cloud.google.com/" target="_blank" className="underline font-medium">Google Cloud Console</a>, enable the Google Fit API, and create OAuth 2.0 credentials. Add the redirect URI below to your authorized redirect URIs.
+            Create a project in the <a href="https://console.cloud.google.com/" target="_blank" className="underline font-medium">Google Cloud Console</a>, enable the <span className="font-medium">Google Health API</span> (the legacy Google Fit API was deprecated in 2026), and create OAuth 2.0 credentials. Under <span className="font-medium">Data Access</span>, add the <code>googlehealth.activity_and_fitness.readonly</code>, <code>googlehealth.health_metrics_and_measurements.readonly</code>, and <code>googlehealth.sleep.readonly</code> scopes. Add the redirect URI below to your authorized redirect URIs.
           </p>
         </div>
 

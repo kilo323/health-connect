@@ -18,10 +18,13 @@ export default function Header() {
           </button>
 
           {user && (
-            <div className="flex items-center gap-3 pl-4 border-l border-gray-200">
+            <Link
+              href="/profile"
+              className="flex items-center gap-3 pl-4 border-l border-gray-200 hover:bg-gray-50 rounded-lg px-2 py-1 -my-1 transition-colors"
+            >
               <User className="h-5 w-5 text-gray-600" />
               <span className="text-sm font-medium text-gray-700">{user.username}</span>
-            </div>
+            </Link>
           )}
         </div>
       </div>

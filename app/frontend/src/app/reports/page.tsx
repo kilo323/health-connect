@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react';
 import AuthLayout from '@/components/AuthLayout';
 import { Activity, TrendingUp, TrendingDown, Minus, BarChart3, Loader2 } from 'lucide-react';
 import apiClient from '@/lib/api-client';
+import { useUnitConversion } from '@/hooks/useUnitConversion';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area,
 } from 'recharts';
@@ -122,6 +123,7 @@ export default function ReportsPage() {
   const [loading, setLoading] = useState(true);
   const [period, setPeriod] = useState<number>(30);
   const [selectedMetric, setSelectedMetric] = useState<string | null>(null);
+  const { convert } = useUnitConversion();
 
   useEffect(() => {
     loadReport();
@@ -213,6 +215,12 @@ export default function ReportsPage() {
             <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 mb-8">
               {summary.map(item => {
                 const color = METRIC_COLORS[item.metric_type] || '#6b7280';
+                const converted = convert(item.metric_type, item.latest_value, item.unit);
+                const displayVal = formatValue(converted.value, item.metric_type);
+                const displayUnit = converted.unit;
+                const convertedAvg = item.recent_avg !== null
+                  ? convert(item.metric_type, item.recent_avg, item.unit)
+                  : null;
                 return (
                   <div
                     key={item.metric_type}
@@ -240,18 +248,18 @@ export default function ReportsPage() {
                     </div>
                     <div className="flex items-baseline gap-1">
                       <span className="text-2xl font-bold" style={{ color }}>
-                        {formatValue(item.latest_value, item.metric_type)}
+                        {displayVal}
                       </span>
                       <span className="text-sm text-gray-500">
-                        {formatUnit(item.unit, item.metric_type)}
+                        {displayUnit}
                       </span>
                     </div>
                     <p className="text-xs text-gray-400 mt-1">
                       {new Date(item.recorded_at).toLocaleDateString()}
                     </p>
-                    {item.recent_avg !== null && (
+                    {convertedAvg !== null && (
                       <p className="text-xs text-gray-400">
-                        7d avg: {formatValue(item.recent_avg, item.metric_type)}
+                        7d avg: {formatValue(convertedAvg.value, item.metric_type)}
                       </p>
                     )}
                   </div>
@@ -261,19 +269,27 @@ export default function ReportsPage() {
           )}
 
           {/* Chart */}
-          {selectedMetric && chartData.length > 0 && (
+          {selectedMetric && chartData.length > 0 && (() => {
+            // Convert chart data to preferred unit
+            const convertedChartData = chartData.map((p) => {
+              const c = convert(selectedMetric, p.value, p.unit);
+              return { ...p, value: Math.round(c.value * 100) / 100, unit: c.unit };
+            });
+            const chartUnit = convertedChartData[0]?.unit || '';
+
+            return (
             <div className="card">
               <div className="flex items-center justify-between mb-4">
                 <h2 className="text-lg font-semibold text-gray-900">
                   {METRIC_LABELS[selectedMetric] || selectedMetric.replace(/_/g, ' ')} Trend
                 </h2>
                 <span className="text-sm text-gray-500">
-                  {chartData.length} data point{chartData.length !== 1 ? 's' : ''} over {getRangeLabel(period)}
+                  {convertedChartData.length} data point{convertedChartData.length !== 1 ? 's' : ''} over {getRangeLabel(period)}
                 </span>
               </div>
               <div className="h-72">
                 <ResponsiveContainer width="100%" height="100%">
-                  <AreaChart data={chartData} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
+                  <AreaChart data={convertedChartData} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
                     <defs>
                       <linearGradient id={`gradient-${selectedMetric}`} x1="0" y1="0" x2="0" y2="1">
                         <stop
@@ -301,7 +317,7 @@ export default function ReportsPage() {
                     <Tooltip
                       labelFormatter={(v) => new Date(v + 'T00:00:00').toLocaleDateString()}
                       formatter={(value) => [
-                        `${formatValue(Number(value), selectedMetric)} ${formatUnit(chartData[0]?.unit || '', selectedMetric)}`,
+                        `${formatValue(Number(value), selectedMetric)} ${chartUnit}`,
                         METRIC_LABELS[selectedMetric] || selectedMetric,
                       ]}
                     />
@@ -316,7 +332,8 @@ export default function ReportsPage() {
                 </ResponsiveContainer>
               </div>
             </div>
-          )}
+            );
+          })()}
 
           {selectedMetric && chartData.length === 0 && summary.length > 0 && (
             <div className="card text-center py-8">

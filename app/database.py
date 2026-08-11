@@ -62,3 +62,17 @@ async def init_db():
             await conn.execute(text("ALTER TABLE metric_definitions ADD COLUMN unit_conversions TEXT"))
         except Exception:
             pass  # Column already exists
+        # Create user_unit_preferences table (created by create_all if new, but ensure for existing DBs)
+        try:
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS user_unit_preferences (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL REFERENCES users(id),
+                    metric_definition_id INTEGER NOT NULL REFERENCES metric_definitions(id),
+                    preferred_unit VARCHAR(50) NOT NULL,
+                    created_at DATETIME NOT NULL,
+                    CONSTRAINT uq_user_metric_pref UNIQUE (user_id, metric_definition_id)
+                )
+            """))
+        except Exception:
+            pass  # Table already exists

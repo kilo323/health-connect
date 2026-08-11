@@ -41,3 +41,37 @@ class UserResponse(BaseModel):
 class LoginResponse(BaseModel):
     user: UserResponse
     token: Token
+
+
+class ProfileUpdate(BaseModel):
+    email: EmailStr | None = None
+
+
+class PasswordChange(BaseModel):
+    current_password: str
+    new_password: str
+
+
+class UnitPreferenceSet(BaseModel):
+    metric_definition_id: int
+    preferred_unit: str
+
+
+class UnitPreferenceResponse(BaseModel):
+    id: int
+    metric_definition_id: int
+    metric_name: str
+    canonical_unit: str | None
+    preferred_unit: str
+
+    class Config:
+        from_attributes = True
+
+
+class MetricSearchResult(BaseModel):
+    id: int
+    name: str
+    category: str | None
+    canonical_unit: str | None
+    available_units: list[str]
+    preferred_unit: str | None = None  # user's current preference, if set

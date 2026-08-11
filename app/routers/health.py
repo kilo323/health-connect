@@ -355,13 +355,24 @@ async def get_google_health_status(
     current_user: UserResponse = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    """Check if Google Health Connect is linked for the current user."""
+    """Check if Google Health Connect is linked for the current user.
+
+    Returns:
+        is_linked: a Google OAuth token is stored for the user.
+        account_linked: whether that Google account has a Google Health
+            (Fitbit) profile behind it — True/False when known, omitted when
+            the state can't be determined (e.g. expired token).
+    """
     result = await db.execute(
         select(AppSettings).where(AppSettings.key == f"google_health_tokens_{current_user.id}")
     )
     tokens = result.scalar_one_or_none()
     is_linked = tokens is not None and bool(tokens.value)
-    return {"is_linked": is_linked}
+    if not is_linked:
+        return {"is_linked": False, "account_linked": None}
+
+    account_linked = await GoogleHealthService().check_account_linked(current_user.id)
+    return {"is_linked": True, "account_linked": account_linked}
 
 
 @router.post("/google-health/disconnect")
@@ -860,7 +871,7 @@ async def connect_google_health(
         "client_id": client_id,
         "redirect_uri": redirect_uri or f"{request.base_url.scheme}://{request.base_url.netloc}/api/health/google-health/callback",
         "response_type": "code",
-        "scope": "https://www.googleapis.com/auth/fitness.activity.read https://www.googleapis.com/auth/fitness.body.read https://www.googleapis.com/auth/fitness.heart_rate.read https://www.googleapis.com/auth/fitness.sleep.read https://www.googleapis.com/auth/fitness.blood_pressure.read https://www.googleapis.com/auth/fitness.blood_glucose.read",
+        "scope": "https://www.googleapis.com/auth/googlehealth.activity_and_fitness.readonly https://www.googleapis.com/auth/googlehealth.health_metrics_and_measurements.readonly https://www.googleapis.com/auth/googlehealth.sleep.readonly",
         "access_type": "offline",
         "prompt": "consent",
         "state": str(current_user.id),
@@ -925,14 +936,46 @@ async def google_health_callback(request: Request, code: str, state: str = "", d
 
     if existing:
         existing.value = encrypted_tokens
-        existing.description = "Google Fit OAuth tokens"
+        existing.description = "Google Health API OAuth tokens"
     else:
-        db.add(AppSettings(key=token_key, value=encrypted_tokens, description="Google Fit OAuth tokens"))
+        db.add(AppSettings(key=token_key, value=encrypted_tokens, description="Google Health API OAuth tokens"))
 
     await db.commit()
 
+    # Best-effort: map the Google Health healthUserId to this local user so
+    # webhook notifications can be routed (used by /webhooks/google-health).
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            identity_resp = await client.get(
+                "https://health.googleapis.com/v4/users/me/identity",
+                headers={"Authorization": f"Bearer {tokens['access_token']}"},
+            )
+        if identity_resp.status_code == 200:
+            health_user_id = identity_resp.json().get("healthUserId")
+            if health_user_id:
+                uid_key = f"google_health_uid_{health_user_id}"
+                uid_result = await db.execute(select(AppSettings).where(AppSettings.key == uid_key))
+                uid_row = uid_result.scalar_one_or_none()
+                if uid_row:
+                    uid_row.value = str(user_id)
+                else:
+                    db.add(AppSettings(key=uid_key, value=str(user_id), description="Google Health user ID mapping"))
+                await db.commit()
+    except Exception as e:
+        logger.warning(f"Failed to fetch Google Health identity for user {user_id}: {e}")
+
+    # Probe whether the Google account is actually linked to Google Health so
+    # the frontend can immediately flag "connected but no health data".
+    try:
+        account_linked = await GoogleHealthService().check_account_linked(user_id)
+    except Exception:
+        account_linked = None
+
     # Redirect back to the frontend settings page
-    return RedirectResponse(url="http://localhost:3000/settings")
+    redirect_url = "http://localhost:3000/settings"
+    if account_linked is False:
+        redirect_url += "?google_account_linked=false"
+    return RedirectResponse(url=redirect_url)
 
 
 @router.get("/documents", response_model=List[DocumentResponse])

@@ -10,6 +10,13 @@ class Settings(BaseSettings):
     llm_api_token: str = ""
     llm_model: str = ""
 
+    # Google Health API webhook notifications (optional).
+    # When webhook_secret is set, POST /api/webhooks/google-health accepts
+    # push notifications instead of relying solely on scheduler polling.
+    # The endpoint must be publicly reachable over HTTPS (TLS 1.2+).
+    google_cloud_project_number: str = ""  # project NUMBER (not ID) for subscriber mgmt
+    webhook_secret: str = ""               # expected Authorization header, e.g. "Bearer <random>"
+
     class Config:
         env_prefix = ""
 

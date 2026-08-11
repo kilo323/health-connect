@@ -66,7 +66,7 @@ export default function AdminSchedulePage() {
     setSyncMessage('');
     try {
       await apiClient.post('/admin/sync/now');
-      setSyncMessage('Sync started! Data will be fetched from Google Fit.');
+      setSyncMessage('Sync started! Syncing from connected accounts.');
       setTimeout(() => setSyncMessage(''), 5000);
     } catch (error: any) {
       setSyncMessage(error.response?.data?.detail || 'Failed to start sync');
