@@ -46,7 +46,7 @@ function Stop-ServiceByPort {
 function Start-Backend {
     Write-Host "`nStarting backend on port $BackendPort..." -ForegroundColor Cyan
     Load-EnvFile (Join-Path $ProjectRoot ".env")
-    $venvActivate = Join-Path $BackendDir ".venv\Scripts\Activate.ps1"
+    $venvActivate = Join-Path $ProjectRoot ".venv\Scripts\Activate.ps1"
     & $venvActivate
     python -m uvicorn app.main:app --reload --host 0.0.0.0 --port $BackendPort
 }
@@ -61,7 +61,7 @@ function Start-Frontend {
 Write-Host "Health Connect Dev Server" -ForegroundColor Magenta
 Write-Host "=========================" -ForegroundColor Magenta
 
-$venvActivate = Join-Path $BackendDir ".venv\Scripts\Activate.ps1"
+$venvActivate = Join-Path $ProjectRoot ".venv\Scripts\Activate.ps1"
 
 switch ($Service) {
     "backend" {
