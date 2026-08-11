@@ -27,6 +27,10 @@ services:
       - LLM_API_TOKEN=${LLM_API_TOKEN:-your-provider-token-here}
       - LLM_URL=${LLM_URL:-https://your-provider.com/v1}
       - LLM_MODEL=${LLM_MODEL:-your-model-name}
+      # Optional separate LLM for metric library refresh; empty → fall back to LLM_*
+      - METRIC_LLM_URL=${METRIC_LLM_URL:-}
+      - METRIC_LLM_API_TOKEN=${METRIC_LLM_API_TOKEN:-}
+      - METRIC_LLM_MODEL=${METRIC_LLM_MODEL:-}
       - DATABASE_URL=sqlite+aiosqlite:////app/data/health_tracker.db
       - FERNET_KEY=${FERNET_KEY:-$(openssl rand -hex 32)}
       # Signal Next.js to use dev server instead of static export
