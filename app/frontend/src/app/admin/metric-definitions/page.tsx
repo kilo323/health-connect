@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import AuthLayout from '@/components/AuthLayout';
-import { TestTube2, Plus, Edit3, Trash2, AlertTriangle, RefreshCw, Link2, Save, X, ChevronDown, ChevronUp, Database } from 'lucide-react';
+import { TestTube2, Plus, Edit3, Trash2, AlertTriangle, RefreshCw, Link2, Save, X, ChevronDown, ChevronUp, Sparkles, CheckCircle, Merge, ArrowRight } from 'lucide-react';
 import apiClient from '@/lib/api-client';
 
 interface ReferenceRange {
@@ -37,6 +37,21 @@ interface UnmatchedMetric {
   suggested_match: string | null;
 }
 
+interface ProposedDefinition {
+  raw_metric_type: string;
+  name: string;
+  category: string | null;
+  unit: string | null;
+  data_type: string;
+  description: string | null;
+  aliases: string[];
+  reference_ranges: ReferenceRange[];
+  unit_conversions: Record<string, number>;
+  similar_definition_id: number | null;
+  similar_definition_name: string | null;
+  similarity_score: number;
+}
+
 const emptyDefinition: Omit<MetricDefinition, 'id'> = {
   name: '',
   category: '',
@@ -60,8 +75,10 @@ export default function AdminMetricDefinitionsPage() {
   const [unitConvVal, setUnitConvVal] = useState('');
   const [saving, setSaving] = useState(false);
   const [normalizing, setNormalizing] = useState(false);
-  const [refreshing, setRefreshing] = useState(false);
+  const [proposing, setProposing] = useState(false);
+  const [proposals, setProposals] = useState<ProposedDefinition[]>([]);
   const [expandedUnmatched, setExpandedUnmatched] = useState<string | null>(null);
+  const [expandedProposal, setExpandedProposal] = useState<string | null>(null);
   const [mapTarget, setMapTarget] = useState<Record<string, number>>({});
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
@@ -165,16 +182,43 @@ export default function AdminMetricDefinitionsPage() {
     }
   };
 
-  const handleRefreshLibrary = async () => {
-    setRefreshing(true);
+  const handlePropose = async () => {
+    setProposing(true);
     try {
-      const res = await apiClient.post('/admin/metric-definitions/refresh-library');
-      showMessage('success', res.data.message);
+      const res = await apiClient.post('/admin/metric-definitions/propose');
+      setProposals(res.data.proposals || []);
+      if ((res.data.proposals || []).length === 0) {
+        showMessage('success', 'No new proposals — all unmatched metrics already map to existing definitions.');
+      }
+    } catch (err: any) {
+      showMessage('error', err.response?.data?.detail || 'Proposal generation failed');
+    } finally {
+      setProposing(false);
+    }
+  };
+
+  const handleMergeProposal = async (proposal: ProposedDefinition, mergeIntoId?: number) => {
+    try {
+      const res = await apiClient.post('/admin/metric-definitions/merge-proposal', {
+        raw_metric_type: proposal.raw_metric_type,
+        name: proposal.name,
+        category: proposal.category,
+        unit: proposal.unit,
+        data_type: proposal.data_type,
+        description: proposal.description,
+        aliases: proposal.aliases,
+        reference_ranges: proposal.reference_ranges,
+        unit_conversions: proposal.unit_conversions,
+        merge_into_definition_id: mergeIntoId ?? null,
+      });
+      showMessage('success', mergeIntoId
+        ? `Merged "${proposal.raw_metric_type}" into "${res.data.name}"`
+        : `Created definition "${res.data.name}"`
+      );
+      setProposals(prev => prev.filter(p => p.raw_metric_type !== proposal.raw_metric_type));
       await loadData();
     } catch (err: any) {
-      showMessage('error', err.response?.data?.detail || 'Library refresh failed');
-    } finally {
-      setRefreshing(false);
+      showMessage('error', err.response?.data?.detail || 'Failed to apply proposal');
     }
   };
 
@@ -248,9 +292,9 @@ export default function AdminMetricDefinitionsPage() {
           Metric Definitions
         </h1>
         <div className="flex items-center gap-3">
-          <button onClick={handleRefreshLibrary} disabled={refreshing} className="btn-secondary text-sm flex items-center gap-1">
-            <Database className={`h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} />
-            {refreshing ? 'Loading...' : 'Refresh from Library'}
+          <button onClick={handlePropose} disabled={proposing || unmatched.length === 0} className="btn-secondary text-sm flex items-center gap-1">
+            <Sparkles className={`h-4 w-4 ${proposing ? 'animate-pulse' : ''}`} />
+            {proposing ? 'Generating...' : 'Generate Proposals'}
           </button>
           <button onClick={handleNormalize} disabled={normalizing} className="btn-secondary text-sm flex items-center gap-1">
             <RefreshCw className={`h-4 w-4 ${normalizing ? 'animate-spin' : ''}`} />
@@ -265,6 +309,68 @@ export default function AdminMetricDefinitionsPage() {
       {message && (
         <div className={`mb-4 p-3 rounded-lg text-sm ${message.type === 'success' ? 'bg-green-50 text-green-800 border border-green-200' : 'bg-red-50 text-red-800 border border-red-200'}`}>
           {message.text}
+        </div>
+      )}
+
+      {/* Proposed Definitions Panel */}
+      {proposals.length > 0 && (
+        <div className="card mb-6 border-l-4 border-purple-400">
+          <div className="flex items-center gap-2 mb-3">
+            <Sparkles className="h-5 w-5 text-purple-600" />
+            <h2 className="text-lg font-semibold text-gray-900">LLM-Proposed Definitions ({proposals.length})</h2>
+          </div>
+          <p className="text-sm text-gray-600 mb-4">
+            Review each proposal. Create a new definition, or merge into the suggested existing one to avoid duplicates.
+          </p>
+          <div className="space-y-2">
+            {proposals.map(p => (
+              <div key={p.raw_metric_type} className="border border-gray-200 rounded-lg">
+                <button
+                  onClick={() => setExpandedProposal(expandedProposal === p.raw_metric_type ? null : p.raw_metric_type)}
+                  className="w-full flex items-center justify-between p-3 hover:bg-gray-50"
+                >
+                  <div className="flex items-center gap-3">
+                    <span className="font-medium text-gray-900">{p.raw_metric_type}</span>
+                    <ArrowRight className="h-3 w-3 text-gray-400" />
+                    <span className="font-medium text-purple-700">{p.name}</span>
+                    {p.similar_definition_id && (
+                      <span className={`text-xs px-2 py-0.5 rounded-full ${p.similarity_score >= 0.8 ? 'bg-amber-100 text-amber-800' : 'bg-blue-50 text-blue-700'}`}>
+                        Looks like {p.similar_definition_name} ({Math.round(p.similarity_score * 100)}%)
+                      </span>
+                    )}
+                  </div>
+                  {expandedProposal === p.raw_metric_type ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+                </button>
+                {expandedProposal === p.raw_metric_type && (
+                  <div className="px-3 pb-3 pt-1 border-t border-gray-100">
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm mb-3">
+                      <div><span className="text-gray-500">Category:</span> {p.category || '-'}</div>
+                      <div><span className="text-gray-500">Unit:</span> {p.unit || '-'}</div>
+                      <div><span className="text-gray-500">Type:</span> {p.data_type}</div>
+                      <div><span className="text-gray-500">Aliases:</span> {p.aliases.join(', ') || '-'}</div>
+                    </div>
+                    {p.description && <p className="text-sm text-gray-600 mb-3">{p.description}</p>}
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        onClick={() => handleMergeProposal(p)}
+                        className="btn-primary text-xs py-1.5 flex items-center gap-1"
+                      >
+                        <CheckCircle className="h-3 w-3" /> Create New
+                      </button>
+                      {p.similar_definition_id && (
+                        <button
+                          onClick={() => handleMergeProposal(p, p.similar_definition_id!)}
+                          className="btn-secondary text-xs py-1.5 flex items-center gap-1"
+                        >
+                          <Merge className="h-3 w-3" /> Merge into "{p.similar_definition_name}"
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
         </div>
       )}
 

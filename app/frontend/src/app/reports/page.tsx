@@ -35,6 +35,9 @@ interface ReportData {
 const METRIC_LABELS: Record<string, string> = {
   steps: 'Steps',
   heart_rate: 'Heart Rate',
+  'Heart Rate (Avg)': 'Heart Rate (Avg)',
+  'Heart Rate (Min)': 'Heart Rate (Min)',
+  'Heart Rate (Max)': 'Heart Rate (Max)',
   sleep: 'Sleep',
   weight: 'Weight',
   distance: 'Distance',
@@ -54,6 +57,9 @@ const METRIC_LABELS: Record<string, string> = {
 const METRIC_COLORS: Record<string, string> = {
   steps: '#3b82f6',
   heart_rate: '#ef4444',
+  'Heart Rate (Avg)': '#ef4444',
+  'Heart Rate (Min)': '#f97316',
+  'Heart Rate (Max)': '#b91c1c',
   sleep: '#8b5cf6',
   weight: '#f59e0b',
   distance: '#10b981',
@@ -76,25 +82,24 @@ function TrendIcon({ trend }: { trend: 'up' | 'down' | 'flat' | null }) {
   return <TrendingDown className="h-4 w-4 text-red-500" />;
 }
 
-function formatValue(value: number, metricType: string): string {
-  if (metricType === 'steps' || metricType === 'heart_minutes' || metricType === 'move_minutes') {
+function formatValue(value: number, unit: string): string {
+  if (!isFinite(value)) return '—';
+
+  // Whole-number units
+  if (unit.toLowerCase() === 'steps' || unit.toLowerCase() === 'heart_points' || unit.toLowerCase() === 'move_minutes' || unit.toLowerCase() === 'kcal' || unit.toLowerCase() === 'cal') {
     return Math.round(value).toLocaleString();
   }
-  if (metricType === 'distance') {
-    return (value / 1000).toFixed(2); // meters to km
+
+  // Time units
+  if (unit.toLowerCase() === 'ms') {
+    return (value / 3600000).toFixed(1);
   }
-  if (metricType === 'sleep') {
-    return (value / 3600000).toFixed(1); // ms to hours
-  }
-  if (metricType === 'calories' || metricType === 'bmr') {
-    return Math.round(value).toLocaleString();
-  }
-  return value.toFixed(1);
+
+  return Number.isInteger(value) ? value.toLocaleString() : value.toFixed(1);
 }
 
-function formatUnit(unit: string, metricType: string): string {
-  if (metricType === 'distance') return 'km';
-  if (metricType === 'sleep') return 'hrs';
+function formatUnit(unit: string): string {
+  if (unit.toLowerCase() === 'ms') return 'hrs';
   return unit;
 }
 
@@ -216,8 +221,8 @@ export default function ReportsPage() {
               {summary.map(item => {
                 const color = METRIC_COLORS[item.metric_type] || '#6b7280';
                 const converted = convert(item.metric_type, item.latest_value, item.unit);
-                const displayVal = formatValue(converted.value, item.metric_type);
-                const displayUnit = converted.unit;
+                const displayVal = formatValue(converted.value, converted.unit);
+                const displayUnit = formatUnit(converted.unit);
                 const convertedAvg = item.recent_avg !== null
                   ? convert(item.metric_type, item.recent_avg, item.unit)
                   : null;
@@ -259,7 +264,7 @@ export default function ReportsPage() {
                     </p>
                     {convertedAvg !== null && (
                       <p className="text-xs text-gray-400">
-                        7d avg: {formatValue(convertedAvg.value, item.metric_type)}
+                        7d avg: {formatValue(convertedAvg.value, convertedAvg.unit)}
                       </p>
                     )}
                   </div>
@@ -317,7 +322,7 @@ export default function ReportsPage() {
                     <Tooltip
                       labelFormatter={(v) => new Date(v + 'T00:00:00').toLocaleDateString()}
                       formatter={(value) => [
-                        `${formatValue(Number(value), selectedMetric)} ${chartUnit}`,
+                        `${formatValue(Number(value), chartUnit)} ${formatUnit(chartUnit)}`,
                         METRIC_LABELS[selectedMetric] || selectedMetric,
                       ]}
                     />

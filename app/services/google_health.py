@@ -2,6 +2,7 @@ import asyncio
 import httpx
 import json
 import logging
+from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 from sqlalchemy import select
 from ..database import async_session_factory
@@ -73,7 +74,10 @@ class GoogleHealthService:
         except ValueError:
             return False
 
-        async with httpx.AsyncClient() as client:
+        # Explicit timeout: without one, a hung/unreachable OAuth endpoint would
+        # block the refresh forever and wedge the whole sync (the fetch paths
+        # already use timeouts; this one did not).
+        async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.post(
                 "https://oauth2.googleapis.com/token",
                 data={
@@ -125,17 +129,27 @@ class GoogleHealthService:
         """Filter expressions use snake_case data type names (e.g. heart-rate -> heart_rate)."""
         return api_type.replace("-", "_")
 
-    def _build_filter(self, api_type: str, start_time, end_time) -> str:
-        """Build an AIP-160 filter expression for the given data type and UTC time range."""
+    def _build_filter(self, api_type: str, start_time, end_time) -> str | None:
+        """Build an AIP-160 filter expression for the given data type and time range.
+
+        Returns None when the type does not accept a server-side filter (verified
+        against the live API 2026-08-14):
+          - sleep (session type) rejects every data-type-member filter -> fetch
+            unfiltered and filter client-side by interval.startTime.
+        """
         snake = self._filter_snake(api_type)
         start_str = start_time.strftime("%Y-%m-%dT%H:%M:%SZ")
         end_str = end_time.strftime("%Y-%m-%dT%H:%M:%SZ")
-        if api_type in self._INTERVAL_TYPES or api_type in self._SESSION_TYPES:
+        if api_type in self._SESSION_TYPES:
+            return None  # session types reject time-member filters
+        if api_type in self._INTERVAL_TYPES:
             field = f"{snake}.interval.start_time"
         elif api_type in self._SAMPLE_TYPES:
             field = f"{snake}.sample_time.physical_time"
-        else:  # daily types are keyed by civil date
-            field = f"{snake}.interval.civil_start_time"
+        else:  # daily types are keyed by civil date (date only, not a timestamp)
+            start_d = start_time.strftime("%Y-%m-%d")
+            end_d = end_time.strftime("%Y-%m-%d")
+            return f'{snake}.date >= "{start_d}" AND {snake}.date < "{end_d}"'
         return f'{field} >= "{start_str}" AND {field} < "{end_str}"'
 
     async def _get_valid_access_token(self, user_id: int, force_refresh: bool = False) -> str:
@@ -234,7 +248,9 @@ class GoogleHealthService:
                     "Content-Type": "application/json",
                 }
 
-                params: Dict[str, Any] = {"filter": filter_expr}
+                params: Dict[str, Any] = {}
+                if filter_expr is not None:
+                    params["filter"] = filter_expr
                 if page_token:
                     params["pageToken"] = page_token
 
@@ -254,14 +270,42 @@ class GoogleHealthService:
                 if not page_token:
                     break
 
+        # Session types are fetched unfiltered (the API rejects their time-member
+        # filters), so trim to the requested window client-side by interval start.
+        if api_type in self._SESSION_TYPES:
+            points = [p for p in points if self._point_in_window(p, api_type, start_time, end_time)]
+
         return points
+
+    @staticmethod
+    def _point_in_window(point: Dict[str, Any], api_type: str, start_time, end_time) -> bool:
+        """Return True if a session point's interval.startTime falls in [start, end).
+
+        The session payload lives under the camelCase union field (e.g. "sleep"),
+        not the first dict value (which may be dataSource/metadata).
+        """
+        union_field = api_type.replace("-", "_")
+        # camelCase the snake_case (e.g. core_body_temperature -> coreBodyTemperature)
+        head, *tail = union_field.split("_")
+        camel = head + "".join(w.title() for w in tail)
+        payload = point.get(camel) or point.get(union_field) or {}
+        ts_str = payload.get("interval", {}).get("startTime")
+        if not ts_str:
+            return False
+        try:
+            start_dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        if start_dt.tzinfo is None:
+            start_dt = start_dt.replace(tzinfo=timezone.utc)
+        return start_time <= start_dt < end_time
 
     async def fetch_daily_rollup(self, user_id: int, data_type: str = "steps", days_back: int = 30, start_time=None, end_time=None) -> list[Dict[str, Any]]:
         """Fetch daily rollup aggregates (e.g. total steps per day) from the Google Health API (v4).
 
-        Note: total-calories, heart-rate, and active-minutes are limited to a 14-day
-        range per request; all other types allow 90 days. Callers should chunk
-        larger windows accordingly.
+        The API caps a rollup request at 90 days (14 for calories/heart-rate/
+        active-minutes), so larger windows are fetched in sequential chunks and
+        concatenated.
         """
         api_type = self.DATA_TYPE_MAP.get(data_type, data_type)
 
@@ -272,44 +316,53 @@ class GoogleHealthService:
             start_time = end_time - timedelta(days=days_back)
 
         url = f"{self.BASE_URL}/v4/users/me/dataTypes/{api_type}/dataPoints:dailyRollUp"
-        body = {
-            "range": {
-                "start": {"date": {"year": start_time.year, "month": start_time.month, "day": start_time.day}},
-                "end": {"date": {"year": end_time.year, "month": end_time.month, "day": end_time.day}},
-            },
-            "windowSizeDays": 1,
-        }
+        # 14-day types vs 90-day types (per Google Health API limits).
+        max_window_days = 14 if api_type in ("total-calories", "heart-rate", "active-minutes") else 90
 
         refreshed = False
-        page_token: Optional[str] = None
         rollups: list[Dict[str, Any]] = []
 
         async with httpx.AsyncClient(timeout=30.0) as client:
-            while True:
-                access_token = await self._get_valid_access_token(user_id, force_refresh=refreshed)
-                headers = {
-                    "Authorization": f"Bearer {access_token}",
-                    "Content-Type": "application/json",
+            # Walk the full window forward in API-sized chunks.
+            chunk_start = start_time
+            while chunk_start < end_time:
+                chunk_end = min(chunk_start + timedelta(days=max_window_days), end_time)
+                body = {
+                    "range": {
+                        "start": {"date": {"year": chunk_start.year, "month": chunk_start.month, "day": chunk_start.day}},
+                        "end": {"date": {"year": chunk_end.year, "month": chunk_end.month, "day": chunk_end.day}},
+                    },
+                    "windowSizeDays": 1,
                 }
 
-                request_body = dict(body)
-                if page_token:
-                    request_body["pageToken"] = page_token
+                page_token: Optional[str] = None
+                while True:
+                    access_token = await self._get_valid_access_token(user_id, force_refresh=refreshed)
+                    headers = {
+                        "Authorization": f"Bearer {access_token}",
+                        "Content-Type": "application/json",
+                    }
 
-                response = await self._request_with_retry(client, "POST", url, headers, json=request_body)
+                    request_body = dict(body)
+                    if page_token:
+                        request_body["pageToken"] = page_token
 
-                if response.status_code == 401 and not refreshed:
-                    refreshed = True
-                    continue
+                    response = await self._request_with_retry(client, "POST", url, headers, json=request_body)
 
-                if response.status_code != 200:
-                    raise ValueError(f"Google Health API error ({response.status_code}): {self._error_message(response)}")
+                    if response.status_code == 401 and not refreshed:
+                        refreshed = True
+                        continue
 
-                data = response.json()
-                rollups.extend(data.get("rollupDataPoints", []))
+                    if response.status_code != 200:
+                        raise ValueError(f"Google Health API error ({response.status_code}): {self._error_message(response)}")
 
-                page_token = data.get("nextPageToken") or None
-                if not page_token:
-                    break
+                    data = response.json()
+                    rollups.extend(data.get("rollupDataPoints", []))
+
+                    page_token = data.get("nextPageToken") or None
+                    if not page_token:
+                        break
+
+                chunk_start = chunk_end
 
         return rollups

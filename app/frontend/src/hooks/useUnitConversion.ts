@@ -183,15 +183,56 @@ export function useUnitConversion() {
 }
 
 /**
- * Find a conversion factor for a unit, case-insensitive.
+ * Normalize common unit aliases and metric prefixes so the lookup succeeds
+ * even when the stored unit doesn't exactly match the conversion map key
+ * (e.g. "meters" vs "m", "kilograms" vs "kg", "centimeters" vs "cm").
+ */
+function normalizeUnit(unit: string): string {
+  const lower = unit.toLowerCase().trim();
+
+  // Common aliases
+  const aliases: Record<string, string> = {
+    m: 'meters',
+    meter: 'meters',
+    metres: 'meters',
+    metre: 'meters',
+    km: 'kilometers',
+    kilometers: 'kilometers',
+    cm: 'centimeters',
+    centimeters: 'centimeters',
+    centimetres: 'centimeters',
+    mm: 'millimeters',
+    millimeters: 'millimeters',
+    g: 'grams',
+    gram: 'grams',
+    kg: 'kilograms',
+    kilograms: 'kilograms',
+    lbs: 'pounds',
+    lb: 'pounds',
+    pounds: 'pounds',
+    in: 'inches',
+    inch: 'inches',
+    ft: 'feet',
+    foot: 'feet',
+    oz: 'ounces',
+    ounce: 'ounces',
+    'fl oz': 'fluid ounces',
+    'fluid oz': 'fluid ounces',
+  };
+
+  return aliases[lower] || lower;
+}
+
+/**
+ * Find a conversion factor for a unit, case-insensitive and alias-aware.
  */
 function findConversionFactor(
   conversions: Record<string, number>,
   unit: string
 ): number | null {
-  const lower = unit.toLowerCase();
+  const normalized = normalizeUnit(unit);
   for (const [key, factor] of Object.entries(conversions)) {
-    if (key.toLowerCase() === lower) {
+    if (normalizeUnit(key) === normalized) {
       return factor;
     }
   }

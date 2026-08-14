@@ -1,11 +1,6 @@
 #!/bin/bash
 set -e
 
-# Register any mounted corporate CA certs with the system trust store
-if [ -d /usr/local/share/ca-certificates ] && ls /usr/local/share/ca-certificates/*.crt &>/dev/null; then
-    update-ca-certificates 2>/dev/null || true
-fi
-
 echo "🔧 Starting development servers..."
 echo "   Backend:  http://localhost:8000  (uvicorn --reload)"
 echo "   Frontend: http://localhost:3000  (Next.js dev server)"

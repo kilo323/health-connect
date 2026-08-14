@@ -8,17 +8,17 @@ const nextConfig: NextConfig = {
 
   // On Windows bind mounts, inotify doesn't fire, so webpack's watcher falls
   // back to polling the whole tree. Exclude heavy, non-source dirs to keep CPU
-  // down in the dev container.
+  // down in the dev container. Extend Next's default ignored regex rather than
+  // replacing it with globs — glob patterns make Watchpack scan every directory
+  // up to the drive root (and trip over C:\hiberfil.sys, pagefile.sys, etc.).
   webpack: (config) => {
     if (isDev) {
+      // Single regex: webpack's schema doesn't allow an array of RegExps.
+      // Same as Next's default (node_modules, .git, .next) plus dist.
       config.watchOptions = {
         ...config.watchOptions,
-        ignored: [
-          "**/node_modules/**",
-          "**/.next/**",
-          "**/dist/**",
-          "**/.git/**",
-        ],
+        ignored:
+          /^((?:[^/]*(?:\/|$))*)(\.(git|next)|node_modules|dist)(\/((?:[^/]*(?:\/|$))*)(?:$|\/))?/,
       };
     }
     return config;

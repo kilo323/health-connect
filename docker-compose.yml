@@ -9,8 +9,6 @@ services:
       - "8000:8000"
     volumes:
       - ./data:/app/data
-      # Mount corporate CA cert so the container trusts your proxy
-      - ./certs:/usr/local/share/ca-certificates:ro
     environment:
       - ADMIN_USER=${ADMIN_USER:-admin}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-changeme}
@@ -23,7 +21,6 @@ services:
       - METRIC_LLM_MODEL=${METRIC_LLM_MODEL:-}
       - DATABASE_URL=sqlite+aiosqlite:////app/data/health_tracker.db
       - FERNET_KEY=${FERNET_KEY:-$(openssl rand -hex 32)}
-      # Point Python (httpx/certifi) at the system CA bundle that includes
-      # any corporate certs registered by update-ca-certificates
-      - SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+      # Set to false to skip SSL cert verification on LLM API calls
+      - LLM_SSL_VERIFY=${LLM_SSL_VERIFY:-true}
 

@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react';
 import AuthLayout from '@/components/AuthLayout';
 import { Database, Save, Play, Square, Loader2, CheckCircle, AlertCircle, Info } from 'lucide-react';
 import apiClient from '@/lib/api-client';
+import { useSyncStore } from '@/store/sync-store';
 
 interface ScheduleSettings {
   is_enabled: boolean;
@@ -20,10 +21,31 @@ export default function AdminSchedulePage() {
   const [saved, setSaved] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [syncMessage, setSyncMessage] = useState('');
+  const { syncInProgress, setSyncInProgress } = useSyncStore();
 
   useEffect(() => {
     loadSettings();
-  }, []);
+
+    // Poll sync status so the button state stays accurate even if the user
+    // leaves this page while a sync is running.
+    let cancelled = false;
+    const checkStatus = async () => {
+      try {
+        const res = await apiClient.get('/admin/status/sync');
+        if (!cancelled) {
+          setSyncInProgress(res.data?.sync_in_progress ?? false);
+        }
+      } catch (error) {
+        // ignore — user may not be logged in
+      }
+    };
+    checkStatus();
+    const interval = setInterval(checkStatus, 3000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [setSyncInProgress]);
 
   const loadSettings = async () => {
     try {
@@ -62,13 +84,16 @@ export default function AdminSchedulePage() {
   };
 
   const handleSyncNow = async () => {
+    if (syncInProgress) return;
     setSyncing(true);
+    setSyncInProgress(true);
     setSyncMessage('');
     try {
       await apiClient.post('/admin/sync/now');
       setSyncMessage('Sync started! Syncing from connected accounts.');
       setTimeout(() => setSyncMessage(''), 5000);
     } catch (error: any) {
+      setSyncInProgress(false);
       setSyncMessage(error.response?.data?.detail || 'Failed to start sync');
     } finally {
       setSyncing(false);
@@ -235,11 +260,11 @@ export default function AdminSchedulePage() {
           <button
             type="button"
             onClick={handleSyncNow}
-            disabled={syncing}
-            className="btn-secondary flex items-center gap-2"
+            disabled={syncInProgress}
+            className="btn-secondary flex items-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
           >
-            {syncing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
-            Sync Now
+            {syncInProgress ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+            {syncInProgress ? 'Syncing...' : 'Sync Now'}
           </button>
         </div>
       </div>

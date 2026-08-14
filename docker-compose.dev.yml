@@ -8,8 +8,6 @@ services:
       - "3000:3000"
       - "8000:8000"
     volumes:
-      # Mount corporate CA cert so the container trusts your proxy
-      - ./certs:/usr/local/share/ca-certificates:ro
       # Mount source code for live reload
       # Backend: match production layout (app/ contents → /app/)
       - ./app:/app
@@ -47,9 +45,8 @@ services:
       # Make the `app` package importable regardless of uvicorn's CWD/sys.path
       # handling (fixes "No module named app" when reload excludes are set).
       - PYTHONPATH=/app
-      # Point Python (httpx/certifi) at the system CA bundle that includes
-      # any corporate certs registered by update-ca-certificates
-      - SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+      # Set to false to skip SSL cert verification on LLM API calls
+      - LLM_SSL_VERIFY=${LLM_SSL_VERIFY:-true}
 
 volumes:
   frontend_node_modules:

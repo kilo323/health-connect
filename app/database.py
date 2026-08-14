@@ -1,10 +1,20 @@
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy import text
+from sqlalchemy.pool import NullPool
 
 from app.config import settings
 
-engine = create_async_engine(settings.database_url, echo=False)
+# Use NullPool so connections are not kept open between requests. SQLite over a
+# Docker bind mount (especially on Windows) is prone to "database is locked"
+# errors when idle pooled connections hold file locks. A long busy timeout lets
+# concurrent writers wait briefly instead of failing immediately.
+engine = create_async_engine(
+    settings.database_url,
+    echo=False,
+    poolclass=NullPool,
+    connect_args={"timeout": 30},
+)
 async_session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 

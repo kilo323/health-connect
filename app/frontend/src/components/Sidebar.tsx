@@ -35,6 +35,7 @@ const adminNavigation = [
   { name: 'Google OAuth', href: '/admin/google-oauth', icon: LinkIcon },
   { name: 'LLM Config', href: '/admin/llm-config', icon: Bot },
   { name: 'Schedule', href: '/admin/schedule', icon: Database },
+  { name: 'Sync Config', href: '/admin/sync-config', icon: Activity },
   { name: 'Metric Definitions', href: '/admin/metric-definitions', icon: TestTube2 },
 ];
 

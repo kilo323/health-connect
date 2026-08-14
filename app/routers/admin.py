@@ -5,9 +5,14 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from pydantic import BaseModel
+from difflib import SequenceMatcher
+from typing import Optional
+import json
 import logging
 import os
+import re
 
+from ..config import settings
 from ..database import get_db
 from ..models.settings import AppSettings, ScheduleConfig
 from ..schemas.auth import Token, UserResponse
@@ -29,6 +34,18 @@ class ScheduleSettings(BaseModel):
     """Schedule configuration settings."""
     is_enabled: bool = False
     cron_expression: str = "0 2 * * *"
+
+
+class MetricRollupSetting(BaseModel):
+    """Per-metric rollup setting."""
+    enabled: bool = True
+    cutoff_days: int = 7
+
+
+class RollupConfig(BaseModel):
+    """Global metric rollup configuration (admin-wide, no per-user override)."""
+    default_cutoff_days: int = 7
+    metrics: dict[str, MetricRollupSetting] = {}
 
 
 class FetchModelsRequest(BaseModel):
@@ -165,6 +182,54 @@ async def update_schedule_settings(
     return {"message": "Schedule settings updated successfully"}
 
 
+@router.get("/settings/rollup")
+async def get_rollup_settings(
+    current_user: UserResponse = Depends(get_current_user),
+):
+    """Get the global metric rollup configuration (admin only)."""
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    from ..services.scheduler import get_rollup_config, DEFAULT_ROLLUP_CONFIG
+    cfg = await get_rollup_config()
+    return {"config": cfg, "defaults": DEFAULT_ROLLUP_CONFIG}
+
+
+@router.put("/settings/rollup")
+async def update_rollup_settings(
+    config: RollupConfig,
+    current_user: UserResponse = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update the global metric rollup configuration (admin only)."""
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    if config.default_cutoff_days < 0:
+        raise HTTPException(status_code=400, detail="default_cutoff_days must be >= 0")
+    for name, m in config.metrics.items():
+        if m.cutoff_days < 0:
+            raise HTTPException(status_code=400, detail=f"cutoff_days for {name} must be >= 0")
+
+    import json
+    from ..services.scheduler import ROLLUP_CONFIG_KEY
+    value = json.dumps({
+        "default_cutoff_days": config.default_cutoff_days,
+        "metrics": {name: {"enabled": m.enabled, "cutoff_days": m.cutoff_days}
+                    for name, m in config.metrics.items()},
+    })
+
+    result = await db.execute(select(AppSettings).where(AppSettings.key == ROLLUP_CONFIG_KEY))
+    existing = result.scalar_one_or_none()
+    if existing:
+        existing.value = value
+    else:
+        db.add(AppSettings(key=ROLLUP_CONFIG_KEY, value=value,
+                           description="Global metric rollup configuration"))
+    await db.commit()
+    return {"message": "Rollup configuration updated successfully"}
+
+
 @router.get("/status/scheduler")
 async def get_scheduler_status(
     current_user: UserResponse = Depends(get_current_user),
@@ -177,8 +242,48 @@ async def get_scheduler_status(
     
     return {
         "is_running": scheduler.is_running(),
+        "sync_in_progress": scheduler.sync_in_progress,
         "next_run": None  # Could be implemented to show next scheduled run time
     }
+
+
+@router.get("/status/sync")
+async def get_sync_status(
+    current_user: UserResponse = Depends(get_current_user),
+):
+    """Return whether a health data sync is currently running."""
+    from ..services.scheduler import scheduler
+    return {"sync_in_progress": scheduler.sync_in_progress}
+
+
+@router.post("/sync/reset")
+async def reset_sync_flag(
+    current_user: UserResponse = Depends(get_current_user),
+):
+    """Manually reset the in-progress sync flag (admin only).
+
+    Use this if a sync task died or got stuck and the UI continues to report
+    that a sync is running. This does not interrupt an actively running sync;
+    it only clears the stale flag.
+    """
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    import asyncio
+    from ..services.scheduler import scheduler
+    was_in_progress = scheduler.sync_in_progress
+
+    # Cancel any live _run_sync task so a wedged sync doesn't linger as an
+    # orphaned coroutine (and potentially re-set the flag or write late data).
+    cancelled = False
+    for task in asyncio.all_tasks():
+        coro = getattr(task.get_coro(), "__qualname__", "")
+        if "_run_sync" in coro and not task.done():
+            task.cancel()
+            cancelled = True
+
+    scheduler._sync_in_progress = False
+    return {"was_in_progress": was_in_progress, "cancelled_task": cancelled, "sync_in_progress": False}
 
 
 @router.post("/sync/now")
@@ -197,6 +302,30 @@ async def sync_now(
     return {"message": "Sync started"}
 
 
+@router.get("/sync/debug")
+async def debug_sync_task(
+    current_user: UserResponse = Depends(get_current_user),
+):
+    """Return the current stack of any running _run_sync task (admin only)."""
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    import asyncio
+    import traceback
+    from ..services.scheduler import scheduler
+
+    for task in asyncio.all_tasks():
+        coro = getattr(task.get_coro(), "__qualname__", "")
+        if "_run_sync" in coro:
+            return {
+                "sync_in_progress": scheduler.sync_in_progress,
+                "task_name": task.get_name(),
+                "stack": traceback.format_stack(task.get_stack()[0]) if task.get_stack() else [],
+            }
+
+    return {"sync_in_progress": scheduler.sync_in_progress, "task_name": None, "stack": []}
+
+
 @router.get("/llm/models")
 async def fetch_llm_models(
     base_url: str,
@@ -213,7 +342,7 @@ async def fetch_llm_models(
         if not clean_url.endswith("/v1"):
             clean_url = f"{clean_url}/v1"
         
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=30.0, verify=settings.llm_ssl_verify) as client:
             response = await client.get(
                 f"{clean_url}/models",
                 headers={
@@ -360,6 +489,360 @@ from ..schemas.health_data import (
 )
 
 
+# ─── LLM-driven metric definition proposals ────────────────────────────────
+
+class ProposedDefinition(BaseModel):
+    """A single LLM-proposed metric definition for admin review."""
+    raw_metric_type: str
+    name: str
+    category: Optional[str] = None
+    unit: Optional[str] = None
+    data_type: str = "float"
+    description: Optional[str] = None
+    aliases: list[str] = []
+    reference_ranges: list[dict] = []
+    unit_conversions: dict = {}
+    similar_definition_id: Optional[int] = None
+    similar_definition_name: Optional[str] = None
+    similarity_score: float = 0.0
+
+
+class ProposeDefinitionsResponse(BaseModel):
+    """Response from the propose endpoint."""
+    proposals: list[ProposedDefinition]
+    unmatched_count: int
+
+
+class MergeProposalRequest(BaseModel):
+    """Request to accept or merge a proposed definition."""
+    raw_metric_type: str
+    name: str
+    category: Optional[str] = None
+    unit: Optional[str] = None
+    data_type: str = "float"
+    description: Optional[str] = None
+    aliases: list[str] = []
+    reference_ranges: list[dict] = []
+    unit_conversions: dict = {}
+    merge_into_definition_id: Optional[int] = None
+
+
+async def _load_metric_llm_config() -> dict[str, str]:
+    """Load the metric-library LLM config from .env (METRIC_LLM_* > LLM_*).
+
+    This deliberately ignores shell environment variables so the admin UI
+    behaves consistently with the standalone refresh script.
+    """
+    from pathlib import Path
+    env_path = Path(__file__).resolve().parent.parent.parent / ".env"
+    dotenv: dict[str, str] = {}
+    if env_path.exists():
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            dotenv[key.strip()] = value.strip().strip('"').strip("'")
+
+    def _get(metric_key: str, fallback_key: str) -> str:
+        return dotenv.get(metric_key) or dotenv.get(fallback_key) or ""
+
+    return {
+        "base_url": _get("METRIC_LLM_URL", "LLM_URL").rstrip("/"),
+        "api_key": _get("METRIC_LLM_API_TOKEN", "LLM_API_TOKEN"),
+        "model": _get("METRIC_LLM_MODEL", "LLM_MODEL"),
+    }
+
+
+async def _generate_metric_definitions(unmatched: list[dict], definitions: list[MetricDefinition]) -> list[dict]:
+    """Ask the LLM to generate definitions for unmatched metrics."""
+    import httpx
+    from ..config import settings
+
+    config = await _load_metric_llm_config()
+    if not config["base_url"] or not config["api_key"] or not config["model"]:
+        raise HTTPException(status_code=400, detail="Metric LLM not configured in .env")
+
+    existing_names = [d.name for d in definitions]
+    existing_aliases: set[str] = set()
+    for d in definitions:
+        aliases = json.loads(d.aliases or "[]")
+        if isinstance(aliases, list):
+            existing_aliases.update(str(a) for a in aliases)
+
+    truly_unmatched = []
+    for m in unmatched:
+        mt = m["metric_type"]
+        mt_lower = mt.lower()
+        if mt in existing_names or mt in existing_aliases:
+            continue
+        if any(mt_lower == n.lower() for n in existing_names):
+            continue
+        if any(mt_lower == a.lower() for a in existing_aliases):
+            continue
+        truly_unmatched.append(m)
+
+    if not truly_unmatched:
+        return []
+
+    unmatched_text = "\n".join(
+        f'  - "{m["metric_type"]}" (unit: {m.get("unit") or "unknown"}, {m.get("count", 1)} record(s))'
+        for m in truly_unmatched
+    )
+
+    prompt = f"""You are a clinical data specialist. I have health metrics extracted from medical documents that don't yet have definitions in my metric library.
+
+Here are the unmatched metrics:
+{unmatched_text}
+
+For each unmatched metric, provide a definition in the following JSON format. Use standard medical knowledge for reference ranges and aliases. If you're unsure about a reference range, omit it (use empty array) rather than guessing.
+
+Return ONLY a JSON array — no markdown, no explanation, no code fences.
+
+Each entry should follow this schema:
+[
+  {{
+    "name": "Canonical Name",
+    "category": "Category (e.g. CBC, Metabolic, Lipids, Thyroid, Hormones, Liver Function, Kidney Function, Electrolytes, Urinalysis, Body Composition, Vitamins, Inflammation, Iron, Diabetes, Screening)",
+    "unit": "canonical unit",
+    "data_type": "float or string",
+    "description": "Brief description",
+    "aliases": ["alias1", "alias2"],
+    "reference_ranges": [
+      {{"sex": "male", "low": 0.0, "high": 1.0, "source": "common"}},
+      {{"sex": "female", "low": 0.0, "high": 1.0, "source": "common"}},
+      {{"sex": null, "low": 0.0, "high": 1.0, "source": "common"}}
+    ],
+    "unit_conversions": {{"alternate_unit": multiplier}}
+  }}
+]
+
+IMPORTANT:
+- sex should be "male", "female", or null (for both)
+- Use the EXACT metric_type string from the unmatched list as one of the aliases
+- Include common alternate spellings/names as aliases
+- Use null for low/high when it's a one-sided range (e.g. "> 60" means low=60, high=null, operator=">=")
+- For operator-based ranges, add "operator": "<" or "<=" or ">" or ">=" to the range object
+- reference_ranges.source should be "common" for standard published ranges
+- If you truly cannot determine a reference range, use an empty array
+- Be precise with units (mg/dL, ng/mL, g/dL, etc.)
+"""
+
+    base_url = config["base_url"]
+    if not base_url.endswith("/v1"):
+        base_url = f"{base_url}/v1"
+
+    async with httpx.AsyncClient(timeout=120.0, verify=settings.llm_ssl_verify) as client:
+        response = await client.post(
+            f"{base_url}/chat/completions",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {config['api_key']}",
+            },
+            json={
+                "model": config["model"],
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You are a clinical data specialist. Return valid JSON only — no markdown, no code fences, no explanation.",
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                "temperature": 0.2,
+                "max_tokens": 16384,
+            },
+        )
+
+    if response.status_code != 200:
+        raise HTTPException(
+            status_code=502,
+            detail=f"LLM returned {response.status_code}: {response.text[:500]}"
+        )
+
+    content = response.json().get("choices", [{}])[0].get("message", {}).get("content", "")
+    if not content:
+        raise HTTPException(status_code=502, detail="LLM returned empty response")
+
+    # Parse JSON
+    try:
+        parsed = json.loads(content)
+        if isinstance(parsed, list):
+            return parsed
+        if isinstance(parsed, dict) and "definitions" in parsed:
+            return parsed["definitions"]
+    except json.JSONDecodeError:
+        pass
+
+    cleaned = re.sub(r"^```(?:json)?\\s*", "", content.strip())
+    cleaned = re.sub(r"\\s*```$", "", cleaned)
+    try:
+        parsed = json.loads(cleaned)
+        return parsed if isinstance(parsed, list) else parsed.get("definitions", [])
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=502, detail=f"Could not parse LLM response: {e}")
+
+
+@router.post("/metric-definitions/propose", response_model=ProposeDefinitionsResponse)
+async def propose_metric_definitions(
+    current_user: UserResponse = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Generate LLM proposals for currently unmatched metrics (admin only).
+
+    Returns proposed definitions plus the best existing similar match so the
+    admin can decide whether to create new or merge into an existing definition.
+    """
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    from ..services.metric_normalizer import metric_normalizer
+    await metric_normalizer.load(db)
+
+    definitions = list((await db.execute(select(MetricDefinition))).scalars().all())
+    unmatched = await metric_normalizer.get_unmatched_metrics(db)
+
+    generated = await _generate_metric_definitions(unmatched, definitions)
+
+    proposals: list[ProposedDefinition] = []
+    for entry in generated:
+        name = entry.get("name", "").strip()
+        aliases = entry.get("aliases", [])
+        if not name:
+            continue
+
+        # Find the raw metric type this proposal came from
+        raw_metric_type = ""
+        for alias in aliases:
+            if any(alias == um["metric_type"] for um in unmatched):
+                raw_metric_type = alias
+                break
+        if not raw_metric_type:
+            # Fall back to fuzzy matching against unmatched metric types
+            best_score = 0.0
+            for um in unmatched:
+                score = SequenceMatcher(None, name.lower(), um["metric_type"].lower()).ratio()
+                if score > best_score:
+                    best_score = score
+                    raw_metric_type = um["metric_type"]
+
+        similar_def, similarity_score = metric_normalizer.find_similar_definition(name)
+        if not similar_def and raw_metric_type:
+            similar_def, similarity_score = metric_normalizer.find_similar_definition(raw_metric_type)
+
+        # Include the raw name as an alias if the LLM forgot it
+        if raw_metric_type and raw_metric_type not in aliases:
+            aliases = [raw_metric_type] + list(aliases)
+
+        proposals.append(ProposedDefinition(
+            raw_metric_type=raw_metric_type,
+            name=name,
+            category=entry.get("category"),
+            unit=entry.get("unit"),
+            data_type=entry.get("data_type", "float"),
+            description=entry.get("description"),
+            aliases=aliases,
+            reference_ranges=entry.get("reference_ranges", []),
+            unit_conversions=entry.get("unit_conversions", {}),
+            similar_definition_id=similar_def.id if similar_def else None,
+            similar_definition_name=similar_def.name if similar_def else None,
+            similarity_score=round(similarity_score, 2),
+        ))
+
+    return ProposeDefinitionsResponse(proposals=proposals, unmatched_count=len(unmatched))
+
+
+@router.post("/metric-definitions/merge-proposal", response_model=MetricDefinitionResponse)
+async def merge_metric_proposal(
+    payload: MergeProposalRequest,
+    current_user: UserResponse = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Accept a proposed definition: create new or merge into existing (admin only).
+
+    When merge_into_definition_id is provided, the raw metric type and any new
+    aliases are added to the existing definition, and all matching unmatched
+    health metrics are linked to it. Otherwise a new definition is created.
+    """
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    from ..services.metric_normalizer import check_definition_duplicate, metric_normalizer
+
+    raw = payload.raw_metric_type.strip()
+    aliases = [a for a in payload.aliases if a != raw]
+    if raw and raw.lower() != payload.name.lower():
+        aliases = [raw] + aliases
+
+    if payload.merge_into_definition_id:
+        result = await db.execute(
+            select(MetricDefinition).where(MetricDefinition.id == payload.merge_into_definition_id)
+        )
+        definition = result.scalar_one_or_none()
+        if not definition:
+            raise HTTPException(status_code=404, detail="Target definition not found")
+
+        existing_aliases = set(json.loads(definition.aliases or "[]"))
+        existing_aliases.update(a for a in aliases if a)
+        definition.aliases = json.dumps(sorted(existing_aliases))
+
+        # Update unmatched metrics
+        metrics_result = await db.execute(
+            select(HealthMetric).where(
+                HealthMetric.metric_type == raw,
+                HealthMetric.definition_id.is_(None),
+            )
+        )
+        updated = 0
+        for m in metrics_result.scalars().all():
+            m.definition_id = definition.id
+            m.metric_type = definition.name
+            updated += 1
+
+        await db.commit()
+        await db.refresh(definition)
+        metric_normalizer._loaded = False
+        logger.info(f"Merged proposal '{raw}' into '{definition.name}' ({updated} metrics linked)")
+        return definition
+
+    # Creating a new definition
+    dup = await check_definition_duplicate(db, payload.name, aliases)
+    if dup:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Duplicate: proposal matches existing definition '{dup.name}' (id={dup.id})"
+        )
+
+    definition = MetricDefinition(
+        name=payload.name,
+        category=payload.category,
+        unit=payload.unit,
+        data_type=payload.data_type,
+        description=payload.description,
+        aliases=json.dumps(aliases),
+        reference_ranges=json.dumps(payload.reference_ranges or []),
+        unit_conversions=json.dumps(payload.unit_conversions or {}),
+    )
+    db.add(definition)
+    await db.commit()
+    await db.refresh(definition)
+
+    # Link unmatched metrics that use the raw name
+    metrics_result = await db.execute(
+        select(HealthMetric).where(
+            HealthMetric.metric_type == raw,
+            HealthMetric.definition_id.is_(None),
+        )
+    )
+    for m in metrics_result.scalars().all():
+        m.definition_id = definition.id
+        m.metric_type = definition.name
+
+    await db.commit()
+    metric_normalizer._loaded = False
+    logger.info(f"Created metric definition from proposal: {definition.name}")
+    return definition
+
+
 @router.get("/metric-definitions", response_model=list[MetricDefinitionResponse])
 async def list_metric_definitions(
     current_user: UserResponse = Depends(get_current_user),
@@ -383,12 +866,14 @@ async def create_metric_definition(
     if current_user.role != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
 
-    # Check for duplicate name
-    existing = await db.execute(
-        select(MetricDefinition).where(MetricDefinition.name == data.name)
-    )
-    if existing.scalar_one_or_none():
-        raise HTTPException(status_code=409, detail=f"Definition '{data.name}' already exists")
+    # Check for duplicate name or alias (case-insensitive)
+    from ..services.metric_normalizer import check_definition_duplicate
+    dup = await check_definition_duplicate(db, data.name, data.aliases or [])
+    if dup:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Duplicate: '{data.name}' matches existing definition '{dup.name}' (id={dup.id})"
+        )
 
     import json as _json
 
@@ -435,14 +920,13 @@ async def update_metric_definition(
     import json as _json
 
     # Check for name collision with a different definition
-    dup = await db.execute(
-        select(MetricDefinition).where(
-            MetricDefinition.name == data.name,
-            MetricDefinition.id != definition_id,
+    from ..services.metric_normalizer import check_definition_duplicate
+    dup = await check_definition_duplicate(db, data.name, data.aliases or [], exclude_id=definition_id)
+    if dup:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Duplicate: '{data.name}' conflicts with existing definition '{dup.name}' (id={dup.id})"
         )
-    )
-    if dup.scalar_one_or_none():
-        raise HTTPException(status_code=409, detail=f"Another definition with name '{data.name}' already exists")
 
     definition.name = data.name
     definition.category = data.category
@@ -595,33 +1079,3 @@ async def map_unmatched_to_definition(
     }
 
 
-@router.post("/metric-definitions/refresh-library")
-async def refresh_from_library(
-    current_user: UserResponse = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    """Load/update metric definitions from the built-in metric library.
-
-    - Creates new definitions for metrics not yet in the database.
-    - Updates existing definitions (merges aliases, overwrites ranges/conversions).
-    - Returns a summary of created vs updated counts.
-    """
-    if current_user.role != "admin":
-        raise HTTPException(status_code=403, detail="Admin access required")
-
-    from ..services.metric_normalizer import apply_metric_library
-
-    try:
-        summary = await apply_metric_library(db)
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="metric_library.json not found")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to read library: {e}")
-
-    return {
-        "message": (
-            f"Library refreshed: {summary['created']} created, "
-            f"{summary['updated']} updated. Normalized {summary['normalized']} metrics."
-        ),
-        **summary,
-    }

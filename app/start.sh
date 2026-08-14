@@ -1,11 +1,6 @@
 #!/bin/bash
 set -e
 
-# Register any mounted corporate CA certs with the system trust store
-if [ -d /usr/local/share/ca-certificates ] && ls /usr/local/share/ca-certificates/*.crt &>/dev/null; then
-    update-ca-certificates 2>/dev/null || true
-fi
-
 # Start nginx (serves frontend static files + proxies API)
 nginx
 

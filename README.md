@@ -101,6 +101,7 @@ Settings come from environment variables or a `.env` file in the repo root
 | `LLM_API_TOKEN` | — | API token for the LLM provider |
 | `LLM_MODEL` | — | Model name |
 | `METRIC_LLM_URL` / `METRIC_LLM_API_TOKEN` / `METRIC_LLM_MODEL` | fall back to `LLM_*` | Optional separate LLM used only by `refresh_metric_library.py` |
+| `LLM_SSL_VERIFY` | `true` | Set to `false` to skip SSL certificate verification on LLM API calls (e.g. behind a corporate TLS-inspecting proxy) |
 | `METRIC_LIBRARY_PROTECT` | `true` | Protect hand-tuned metric definitions from overwrites (see below) |
 | `GOOGLE_CLOUD_PROJECT_NUMBER` | — | Project **number** for webhook subscriber management |
 | `WEBHOOK_SECRET` | — | Enables `POST /api/webhooks/google-health` (Bearer token). Unset = webhooks disabled |
@@ -256,7 +257,6 @@ seed or a manual **Refresh from Library**.
 | `google_health_boilerplate.py` | Standalone Google Health API experiment (uses `httpx`) |
 | `register_google_health_subscriber.py` | One-time webhook subscriber registration (needs `google-auth` + a service account) |
 | `start.ps1` / `stop.ps1` | Start/stop local dev services |
-| `refresh-certs.ps1` | Refresh corporate CA certs into `certs/` for the container |
 
 ## Docker
 

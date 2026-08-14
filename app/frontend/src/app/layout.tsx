@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import SyncBanner from "@/components/SyncBanner";
 
 export const metadata: Metadata = {
   title: "Health Tracker",
@@ -13,7 +14,10 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" suppressHydrationWarning>
-      <body>{children}</body>
+      <body>
+        <SyncBanner />
+        {children}
+      </body>
     </html>
   );
 }

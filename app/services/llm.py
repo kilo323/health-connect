@@ -5,6 +5,7 @@ import re
 import logging
 from pathlib import Path
 from typing import Dict, Any
+from ..config import settings
 from ..database import async_session_factory
 from ..models.settings import AppSettings
 
@@ -166,7 +167,7 @@ class LLMService:
             prompt = prompt.replace("{metric_names}", names_json)
             user_message = {"role": "user", "content": prompt}
 
-        async with httpx.AsyncClient(timeout=300.0) as client:
+        async with httpx.AsyncClient(timeout=300.0, verify=settings.llm_ssl_verify) as client:
             response = await client.post(
                 f"{base_url}/chat/completions",
                 headers=headers,

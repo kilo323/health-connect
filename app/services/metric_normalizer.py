@@ -22,6 +22,8 @@ logger = logging.getLogger(__name__)
 
 # Threshold for fuzzy matching (0-1). 0.8 is fairly strict.
 _FUZZY_THRESHOLD = 0.8
+# Threshold for surfacing a "possible duplicate" suggestion to the admin.
+_DUPLICATE_THRESHOLD = 0.75
 
 
 @dataclass
@@ -137,6 +139,31 @@ class MetricNormalizer:
         if not self._loaded:
             return []
         return sorted(set(d.name for d in self._definitions))
+
+    def find_similar_definition(self, metric_name: str) -> tuple[Optional[MetricDefinition], float]:
+        """Find the most similar existing definition by name or alias.
+
+        Returns the best-matching definition and its similarity score (0-1).
+        """
+        if not self._loaded or not metric_name:
+            return None, 0.0
+
+        query = metric_name.strip().lower()
+        best_def: Optional[MetricDefinition] = None
+        best_score = 0.0
+
+        for d in self._definitions:
+            candidates = [d.name.lower()]
+            aliases = self._parse_json_field(d.aliases)
+            if isinstance(aliases, list):
+                candidates.extend(a.strip().lower() for a in aliases if isinstance(a, str))
+            for candidate in candidates:
+                score = SequenceMatcher(None, query, candidate).ratio()
+                if score > best_score:
+                    best_score = score
+                    best_def = d
+
+        return best_def, best_score
 
     async def get_unmatched_metrics(self, db: AsyncSession) -> list[dict]:
         """Find health_metrics that have no definition_id set.
@@ -288,106 +315,41 @@ class MetricNormalizer:
         return value
 
 
-async def apply_metric_library(db: AsyncSession) -> dict:
-    """Create/update MetricDefinitions from data/metric_library.json.
+async def check_definition_duplicate(
+    db: AsyncSession,
+    name: str,
+    aliases: list[str] | None = None,
+    exclude_id: int | None = None,
+) -> Optional[MetricDefinition]:
+    """Return an existing definition that conflicts with the given name/aliases.
 
-    Idempotent: matches by exact name, merges aliases, overwrites
-    ranges/conversions. After applying, reloads the normalizer and runs
-    retroactive normalization so existing unlinked metrics get linked.
-
-    Returns a summary dict: {created, updated, skipped, normalized}.
-    Raises FileNotFoundError if the library file cannot be located.
+    Checks canonical name and aliases case-insensitively. Used to prevent
+    duplicate metrics under different spellings.
     """
-    # Locate the library file (repo data/ dir, with Docker fallback)
-    data_dir = Path(__file__).resolve().parent.parent.parent / "data"
-    library_path = data_dir / "metric_library.json"
-    if not library_path.exists():
-        library_path = Path("/app/data/metric_library.json")
-    if not library_path.exists():
-        raise FileNotFoundError("metric_library.json not found")
+    if not name:
+        return None
 
-    from ..config import settings
-    protect = settings.metric_library_protect
+    aliases = aliases or []
+    name_lower = name.strip().lower()
+    alias_lowers = {a.strip().lower() for a in aliases if a.strip()}
 
-    library = json.loads(library_path.read_text(encoding="utf-8"))
-
-    created = 0
-    updated = 0
-    skipped = 0
-    protected = 0
-
-    for entry in library:
-        name = entry.get("name", "").strip()
-        if not name:
-            skipped += 1
+    result = await db.execute(select(MetricDefinition))
+    for d in result.scalars().all():
+        if exclude_id is not None and d.id == exclude_id:
             continue
+        if d.name.strip().lower() == name_lower:
+            return d
+        existing_aliases = check_definition_duplicate._parse_aliases(d.aliases)
+        for existing_alias in existing_aliases:
+            if existing_alias.strip().lower() == name_lower:
+                return d
+        for existing_alias in existing_aliases:
+            if existing_alias.strip().lower() in alias_lowers:
+                return d
+    return None
 
-        is_protected = protect and entry.get("protected") is True
 
-        result = await db.execute(
-            select(MetricDefinition).where(MetricDefinition.name == name)
-        )
-        existing = result.scalar_one_or_none()
-
-        new_aliases = json.dumps(entry.get("aliases", []))
-        new_ranges = json.dumps(entry.get("reference_ranges", []))
-        new_conversions = json.dumps(entry.get("unit_conversions", {}))
-
-        if existing:
-            # Merge aliases — keep existing + add new unique ones (always safe,
-            # even for protected entries, so new name variants still link).
-            existing_aliases = set()
-            try:
-                existing_aliases = set(json.loads(existing.aliases or "[]"))
-            except (json.JSONDecodeError, TypeError):
-                pass
-            merged_aliases = list(existing_aliases | set(entry.get("aliases", [])))
-            existing.aliases = json.dumps(merged_aliases)
-
-            if is_protected:
-                # Protected: leave unit/ranges/conversions/category/description
-                # untouched (aliases above are still merged for linking).
-                protected += 1
-                continue
-
-            existing.reference_ranges = new_ranges
-            existing.unit_conversions = new_conversions
-            existing.category = entry.get("category") or existing.category
-            existing.unit = entry.get("unit") or existing.unit
-            existing.data_type = entry.get("data_type", existing.data_type)
-            existing.description = entry.get("description") or existing.description
-            updated += 1
-        else:
-            db.add(MetricDefinition(
-                name=name,
-                category=entry.get("category"),
-                unit=entry.get("unit"),
-                data_type=entry.get("data_type", "float"),
-                description=entry.get("description"),
-                aliases=new_aliases,
-                reference_ranges=new_ranges,
-                unit_conversions=new_conversions,
-            ))
-            created += 1
-
-    await db.commit()
-
-    # Invalidate the normalizer cache and re-link any unmatched metrics
-    metric_normalizer._loaded = False
-    await metric_normalizer.load(db)
-    normalized = await metric_normalizer.retroactive_normalize(db)
-
-    logger.info(
-        f"Metric library applied: {created} created, {updated} updated, "
-        f"{protected} protected, {skipped} skipped, {normalized} metrics normalized"
-    )
-    return {
-        "created": created,
-        "updated": updated,
-        "skipped": skipped,
-        "protected": protected,
-        "normalized": normalized,
-    }
+check_definition_duplicate._parse_aliases = MetricNormalizer._parse_json_field
 
 
 # Singleton instance

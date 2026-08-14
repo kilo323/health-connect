@@ -101,23 +101,56 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("LLM_URL / LLM_API_TOKEN not set — skipping LLM config seed")
 
-    # Seed metric definitions from the built-in metric library (idempotent).
-    # Creates/updates MetricDefinitions and re-links unmatched health_metrics.
-    try:
-        from .services.metric_normalizer import apply_metric_library
+    # Seed Google OAuth config from environment variables when the stored config
+    # is missing or has no usable values.
+    if settings.google_client_id and settings.google_client_secret:
         db = async_session_factory()
         try:
-            summary = await apply_metric_library(db)
-            logger.info(
-                "Metric library seeded: "
-                f"{summary['created']} created, {summary['updated']} updated, "
-                f"{summary['normalized']} metrics normalized"
+            result = await db.execute(
+                select(AppSettings).where(AppSettings.key == "google_oauth_config")
             )
+            existing = result.scalar_one_or_none()
+
+            needs_seed = False
+            if not existing or not existing.value:
+                needs_seed = True
+            else:
+                try:
+                    data = _json.loads(existing.value)
+                    if not data.get("client_id") or not data.get("client_secret"):
+                        needs_seed = True
+                except (_json.JSONDecodeError, TypeError):
+                    needs_seed = True
+
+            if needs_seed:
+                redirect_uri = ""
+                if existing and existing.value:
+                    try:
+                        redirect_uri = _json.loads(existing.value).get("redirect_uri", "")
+                    except (_json.JSONDecodeError, TypeError):
+                        redirect_uri = ""
+                oauth_config = _json.dumps({
+                    "client_id": settings.google_client_id,
+                    "client_secret": settings.google_client_secret,
+                    "redirect_uri": redirect_uri,
+                })
+                if existing:
+                    existing.value = oauth_config
+                    existing.description = "Google OAuth configuration (seeded from environment variables)"
+                else:
+                    db.add(AppSettings(
+                        key="google_oauth_config",
+                        value=oauth_config,
+                        description="Google OAuth configuration (seeded from environment variables)",
+                    ))
+                await db.commit()
+                logger.info("Google OAuth configuration seeded from environment variables")
+            else:
+                logger.info("Google OAuth configuration already present, skipping env seed")
         finally:
             await db.close()
-    except Exception as e:
-        # Never let a malformed/missing library block startup
-        logger.warning(f"Metric library seed skipped: {e}")
+    else:
+        logger.info("GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET not set — skipping Google OAuth config seed")
 
     # Start scheduler if enabled
     try:
