@@ -1,6 +1,9 @@
 # ── Frontend build stage (production only) ──
 FROM node:22-slim AS frontend-builder
 
+# Pin npm to the latest stable major version to avoid warnings and ensure reproducible installs
+RUN npm install -g npm@12
+
 WORKDIR /build
 COPY app/frontend/ ./
 RUN npm ci
