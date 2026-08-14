@@ -3,6 +3,7 @@ uploads/
 data/*
 00-sample-docs/
 certs/
+.dev-pids.json
 
 # specific includes
 !data/llm_prompt.md
