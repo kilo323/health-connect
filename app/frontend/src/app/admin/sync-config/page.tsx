@@ -74,7 +74,7 @@ export default function AdminSyncConfigPage() {
       ...c,
       metrics: {
         ...c.metrics,
-        [name]: { enabled: true, cutoff_days: c.default_cutoff_days, ...c.metrics[name], ...patch },
+        [name]: { ...c.metrics[name], enabled: true, cutoff_days: c.default_cutoff_days, ...patch },
       },
     }));
   };

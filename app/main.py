@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import logging
+import os
 import sys
 from contextlib import asynccontextmanager
 from sqlalchemy import select
@@ -181,10 +182,18 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# CORS middleware
+# CORS middleware. Allow the local dev frontend plus the configured public origin
+# (reverse-proxy deployments) and any extra comma-separated origins.
+_frontend_port = os.getenv("FRONTEND_PORT", "3000")
+_allow_origins = [f"http://localhost:{_frontend_port}", f"http://127.0.0.1:{_frontend_port}"]
+if settings.public_url:
+    _allow_origins.append(settings.public_url.rstrip("/"))
+if settings.cors_extra_origins:
+    _allow_origins.extend(o.strip() for o in settings.cors_extra_origins.split(",") if o.strip())
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],  # React dev server
+    allow_origins=_allow_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

@@ -17,14 +17,21 @@ export default function AdminGoogleOAuthPage() {
     loadConfig();
   }, []);
 
+  // Derive the callback URL from the origin the admin is currently using — so on a
+  // public/reverse-proxied deployment it pre-fills the public URL automatically.
+  const deriveRedirectUri = () =>
+    `${window.location.origin}/api/health/google-health/callback`;
+
   const loadConfig = async () => {
     try {
       const res = await apiClient.get('/admin/settings/google-oauth');
       setClientId(res.data?.client_id || '');
       setClientSecret(res.data?.client_secret || '');
-      setRedirectUri(res.data?.redirect_uri || '');
+      // Pre-fill with the current-origin callback only when none is stored.
+      setRedirectUri(res.data?.redirect_uri || deriveRedirectUri());
     } catch (error) {
       console.error('Failed to load Google OAuth config:', error);
+      setRedirectUri(deriveRedirectUri());
     } finally {
       setLoading(false);
     }
@@ -109,10 +116,13 @@ export default function AdminGoogleOAuthPage() {
               type="url"
               value={redirectUri}
               onChange={(e) => setRedirectUri(e.target.value)}
-              placeholder="http://localhost:8000/api/health/google-health/callback"
+              placeholder={deriveRedirectUri()}
               className="input-field font-mono text-sm"
             />
-            <p className="text-xs text-gray-500 mt-1">Leave empty to auto-detect from the user's browser URL</p>
+            <p className="text-xs text-gray-500 mt-1">
+              Pre-filled from the current page origin — on a public/reverse-proxied deployment this is
+              your public URL. Register this exact value in Google Cloud as an authorized redirect URI.
+            </p>
           </div>
 
           <button

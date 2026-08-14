@@ -5,11 +5,13 @@ services:
     container_name: health-connect
     restart: unless-stopped
     ports:
-      - "3000:3000"
-      - "8000:8000"
+      - "${FRONTEND_PORT:-3000}:${FRONTEND_PORT:-3000}"
+      - "${BACKEND_PORT:-8000}:${BACKEND_PORT:-8000}"
     volumes:
       - ./data:/app/data
     environment:
+      - BACKEND_PORT=${BACKEND_PORT:-8000}
+      - FRONTEND_PORT=${FRONTEND_PORT:-3000}
       - ADMIN_USER=${ADMIN_USER:-admin}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-changeme}
       - LLM_API_TOKEN=${LLM_API_TOKEN:-your-provider-token-here}
@@ -23,4 +25,19 @@ services:
       - FERNET_KEY=${FERNET_KEY:-$(openssl rand -hex 32)}
       # Set to false to skip SSL cert verification on LLM API calls
       - LLM_SSL_VERIFY=${LLM_SSL_VERIFY:-true}
+      # Google OAuth (app-level); used to seed google_oauth_config at startup when
+      # the stored config is missing/empty. Empty → seeding skipped.
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
+      # Metric library protection flag (default true in app config)
+      - METRIC_LIBRARY_PROTECT=${METRIC_LIBRARY_PROTECT:-true}
+      # Optional Google Health webhook notifications; empty → webhooks disabled
+      - GOOGLE_CLOUD_PROJECT_NUMBER=${GOOGLE_CLOUD_PROJECT_NUMBER:-}
+      - WEBHOOK_SECRET=${WEBHOOK_SECRET:-}
+      # Reverse-proxy / public deployment. PUBLIC_URL = public origin (e.g.
+      # https://health.example.com) used for post-OAuth redirect + CORS.
+      # FORWARDED_ALLOW_IPS = which proxy IPs to trust X-Forwarded-* from (default *).
+      - PUBLIC_URL=${PUBLIC_URL:-}
+      - CORS_EXTRA_ORIGINS=${CORS_EXTRA_ORIGINS:-}
+      - FORWARDED_ALLOW_IPS=${FORWARDED_ALLOW_IPS:-*}
 

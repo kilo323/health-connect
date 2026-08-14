@@ -7,9 +7,25 @@ $ErrorActionPreference = "SilentlyContinue"
 $ProjectRoot = $PSScriptRoot
 $BackendDir = Join-Path $ProjectRoot "app"
 $FrontendDir = Join-Path $ProjectRoot "app\frontend"
-$BackendPort = 8000
-$FrontendPort = 3000
 $PidFile = Join-Path $ProjectRoot ".dev-pids.json"
+
+# Resolve ports from process env first, then .env, else default 8000/3000.
+# (Read .env inline here since the Load-EnvFile function is defined below.)
+function Get-PortFromEnv {
+    param([string]$Name, [int]$Default)
+    $val = [Environment]::GetEnvironmentVariable($Name, "Process")
+    if (-not $val) {
+        $envFile = Join-Path $ProjectRoot ".env"
+        if (Test-Path $envFile) {
+            $line = Get-Content $envFile | Where-Object { $_ -match "^\s*$Name=" } | Select-Object -First 1
+            if ($line) { $val = ($line -split '=', 2)[1].Trim('"').Trim("'").Trim() }
+        }
+    }
+    if ($val) { return [int]$val }
+    return $Default
+}
+$BackendPort = Get-PortFromEnv -Name "BACKEND_PORT" -Default 8000
+$FrontendPort = Get-PortFromEnv -Name "FRONTEND_PORT" -Default 3000
 
 function Load-EnvFile {
     param([string]$EnvFile)

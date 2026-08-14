@@ -105,6 +105,31 @@ Settings come from environment variables or a `.env` file in the repo root
 | `METRIC_LIBRARY_PROTECT` | `true` | Protect hand-tuned metric definitions from overwrites (see below) |
 | `GOOGLE_CLOUD_PROJECT_NUMBER` | — | Project **number** for webhook subscriber management |
 | `WEBHOOK_SECRET` | — | Enables `POST /api/webhooks/google-health` (Bearer token). Unset = webhooks disabled |
+| `BACKEND_PORT` | `8000` | Port the FastAPI backend listens on |
+| `FRONTEND_PORT` | `3000` | Port the frontend (nginx prod / Next dev) listens on |
+| `PUBLIC_URL` | — | Optional explicit public-origin override (e.g. `https://health.example.com`). Normally unneeded — origins are derived from the request's forwarded host. Set only if API and frontend are on different hosts |
+| `CORS_EXTRA_ORIGINS` | — | Comma-separated extra allowed CORS origins |
+| `FORWARDED_ALLOW_IPS` | `*` | Proxy IPs whose `X-Forwarded-*` headers uvicorn trusts (controls `request.base_url` scheme/host used for OAuth `redirect_uri`) |
+
+### Deploying behind a reverse proxy
+
+The app listens on `0.0.0.0` and honors `X-Forwarded-Proto`/`Host` (`uvicorn --proxy-headers`).
+For a networked / proxied deployment:
+
+1. Register the **public** callback URL in Google Cloud. The admin Google OAuth page
+   pre-fills the Redirect URI from the origin you're browsing (e.g.
+   `https://health.example.com/api/health/google-health/callback`) — just save it.
+2. That's it for most setups. The post-OAuth redirect and the callback URL are both
+   derived from the incoming request's forwarded scheme/host, so they work with zero
+   extra config. Set `PUBLIC_URL` only as an explicit override if the API and frontend
+   are reached on different hosts.
+3. If front and back ends are served from the same origin (typical behind one proxy), CORS is a
+   non-issue. Only add `CORS_EXTRA_ORIGINS` if they're split across origins.
+4. Set `FORWARDED_ALLOW_IPS` to your proxy's IP if you don't want to trust all proxies (`*`).
+
+Intra-container `localhost`/`127.0.0.1` (nginx→uvicorn, Next→uvicorn) is internal and unaffected.
+
+See [docs/reverse-proxy.md](docs/reverse-proxy.md) for sample nginx / Traefik / Caddy configs.
 
 ### Google Health (per-user) setup
 

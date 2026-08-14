@@ -13,7 +13,7 @@ FROM python:3.12-slim
 WORKDIR /app
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends curl nginx ca-certificates && \
+    apt-get install -y --no-install-recommends curl nginx ca-certificates gettext-base && \
     rm -rf /var/lib/apt/lists/*
 
 # Backend source
@@ -28,9 +28,9 @@ COPY --from=frontend-builder /build/dist /app/frontend/dist
 # Install dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Configure nginx
-RUN rm -rf /etc/nginx/sites-enabled/default && \
-    cp /app/nginx.conf /etc/nginx/sites-enabled/health-connect
+# Configure nginx (config is rendered via envsubst in start.sh using
+# BACKEND_PORT/FRONTEND_PORT, so just remove the default site here)
+RUN rm -rf /etc/nginx/sites-enabled/default
 
 EXPOSE 3000 8000
 

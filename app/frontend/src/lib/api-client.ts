@@ -20,8 +20,9 @@ interface ApiClient extends AxiosInstance {
   register: (username: string, email: string | null, password: string) => Promise<AuthResponse>;
 }
 
+const backendPort = process.env.NEXT_PUBLIC_BACKEND_PORT || '8000';
 const instance = axios.create({
-  baseURL: process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api',
+  baseURL: process.env.NEXT_PUBLIC_API_URL || `http://localhost:${backendPort}/api`,
   headers: {
     'Content-Type': 'application/json',
   },

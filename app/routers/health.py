@@ -972,8 +972,17 @@ async def google_health_callback(request: Request, code: str, state: str = "", d
     except Exception:
         account_linked = None
 
-    # Redirect back to the frontend settings page
-    redirect_url = "http://localhost:3000/settings"
+    # Redirect back to the frontend settings page. Derive the origin from the
+    # incoming request (which honors X-Forwarded-Proto/Host via --proxy-headers), so
+    # it works on local dev and reverse-proxied deployments with zero config.
+    # PUBLIC_URL, when set, is an explicit override (e.g. if the API is reached on a
+    # different host than the frontend).
+    from ..config import settings as _settings
+    if _settings.public_url:
+        base = _settings.public_url.rstrip("/")
+    else:
+        base = f"{request.base_url.scheme}://{request.base_url.netloc}"
+    redirect_url = f"{base}/settings"
     if account_linked is False:
         redirect_url += "?google_account_linked=false"
     return RedirectResponse(url=redirect_url)

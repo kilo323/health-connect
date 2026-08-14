@@ -26,6 +26,14 @@ class Settings(BaseSettings):
     google_client_id: str = ""
     google_client_secret: str = ""
 
+    # Optional explicit public origin override (e.g. "https://health.example.com").
+    # Normally NOT needed: the post-OAuth redirect and OAuth callback URL are derived
+    # from the incoming request's forwarded scheme/host. Set only if the API is
+    # reached on a different host than the frontend. Also added to CORS origins.
+    public_url: str = ""
+    # Comma-separated extra CORS origins (in addition to localhost + public_url).
+    cors_extra_origins: str = ""
+
     # Google Health API webhook notifications (optional).
     # When webhook_secret is set, POST /api/webhooks/google-health accepts
     # push notifications instead of relying solely on scheduler polling.

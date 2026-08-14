@@ -5,14 +5,12 @@ services:
       dockerfile: Dockerfile.dev
     container_name: health-connect-dev
     ports:
-      - "3000:3000"
-      - "8000:8000"
+      - "${FRONTEND_PORT:-3000}:${FRONTEND_PORT:-3000}"
+      - "${BACKEND_PORT:-8000}:${BACKEND_PORT:-8000}"
     volumes:
       # Mount source code for live reload
       # Backend: match production layout (app/ contents → /app/)
       - ./app:/app
-      # Frontend: override with host source for HMR (more specific mount wins)
-      - ./app/frontend:/app/frontend
       # Persist database and data
       - ./data:/app/data
       # Persist node_modules so npm install isn't lost on mount
@@ -20,6 +18,8 @@ services:
       # Persist Next.js cache for faster rebuilds
       - frontend_next:/app/frontend/.next
     environment:
+      - BACKEND_PORT=${BACKEND_PORT:-8000}
+      - FRONTEND_PORT=${FRONTEND_PORT:-3000}
       - ADMIN_USER=${ADMIN_USER:-admin}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-changeme}
       - LLM_API_TOKEN=${LLM_API_TOKEN:-your-provider-token-here}
@@ -47,6 +47,19 @@ services:
       - PYTHONPATH=/app
       # Set to false to skip SSL cert verification on LLM API calls
       - LLM_SSL_VERIFY=${LLM_SSL_VERIFY:-true}
+      # Google OAuth (app-level); used to seed google_oauth_config at startup when
+      # the stored config is missing/empty. Empty → seeding skipped.
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
+      # Metric library protection flag (default true in app config)
+      - METRIC_LIBRARY_PROTECT=${METRIC_LIBRARY_PROTECT:-true}
+      # Optional Google Health webhook notifications; empty → webhooks disabled
+      - GOOGLE_CLOUD_PROJECT_NUMBER=${GOOGLE_CLOUD_PROJECT_NUMBER:-}
+      - WEBHOOK_SECRET=${WEBHOOK_SECRET:-}
+      # Reverse-proxy / public deployment (PUBLIC_URL used for post-OAuth redirect + CORS)
+      - PUBLIC_URL=${PUBLIC_URL:-}
+      - CORS_EXTRA_ORIGINS=${CORS_EXTRA_ORIGINS:-}
+      - FORWARDED_ALLOW_IPS=${FORWARDED_ALLOW_IPS:-*}
 
 volumes:
   frontend_node_modules:
