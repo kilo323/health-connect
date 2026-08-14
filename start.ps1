@@ -9,6 +9,7 @@ $BackendDir = Join-Path $ProjectRoot "app"
 $FrontendDir = Join-Path $ProjectRoot "app\frontend"
 $BackendPort = 8000
 $FrontendPort = 3000
+$PidFile = Join-Path $ProjectRoot ".dev-pids.json"
 
 function Load-EnvFile {
     param([string]$EnvFile)
@@ -41,6 +42,23 @@ function Stop-ServiceByPort {
     } else {
         Write-Host "$Name was not running on port $Port." -ForegroundColor DarkGray
     }
+}
+
+function Save-ServicePids {
+    param(
+        [string]$Name,
+        [int]$WindowPid
+    )
+    $existing = @()
+    if (Test-Path $PidFile) {
+        # PS 5.1: @(...) around ConvertFrom-Json collapses top-level arrays into
+        # one element, so force enumeration first with ForEach-Object { $_ }.
+        try { $existing = @((Get-Content $PidFile -Raw | ConvertFrom-Json | ForEach-Object { $_ })) } catch { $existing = @() }
+    }
+    # Replace any stale record for the same service instead of appending duplicates.
+    $existing = @($existing | Where-Object { $_.name -ne $Name })
+    $existing += [PSCustomObject]@{ name = $Name; pids = @($WindowPid) }
+    $existing | ConvertTo-Json -Depth 4 | Set-Content $PidFile -Encoding UTF8
 }
 
 function Start-Backend {
@@ -79,8 +97,11 @@ switch ($Service) {
         $backendCmd = "& '$venvActivate'; python -m uvicorn app.main:app --reload --host 0.0.0.0 --port $BackendPort"
         $frontendCmd = "cd '$FrontendDir'; npm run dev"
         
-        Start-Process powershell -ArgumentList "-NoExit", "-Command", $backendCmd
-        Start-Process powershell -ArgumentList "-NoExit", "-Command", $frontendCmd
+        $backendProc = Start-Process powershell -ArgumentList "-NoExit", "-Command", $backendCmd -PassThru
+        $frontendProc = Start-Process powershell -ArgumentList "-NoExit", "-Command", $frontendCmd -PassThru
+        
+        Save-ServicePids -Name "Backend" -WindowPid $backendProc.Id
+        Save-ServicePids -Name "Frontend" -WindowPid $frontendProc.Id
         
         Write-Host "Backend starting on port $BackendPort..." -ForegroundColor Green
         Write-Host "Frontend starting on port $FrontendPort..." -ForegroundColor Green
