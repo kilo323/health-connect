@@ -1,5 +1,23 @@
 # TODO
 
+## ~~Metric daily aggregation + rollup/raw overlap cleanup~~ — DONE (2026-08-19)
+
+Dashboard/reports showed only the latest raw interval row per day (e.g. "2 steps")
+instead of the day's total. Fixed in three parts:
+
+1. `health_metrics.granularity` column (`raw` | `daily`) + idempotency
+   migration in `app/database.py`: collapses legacy duplicate rows, tags UTC-midnight
+   Google rollup rows as `daily`, deletes granular rows superseded by a rollup,
+   and creates the unique index `uq_health_metric_point (user_id, metric_type,
+   recorded_at, source)` that `sync_health_data` relied on.
+2. Read path (`app/routers/health.py`): `_daily_metric_values()` produces one value
+   per (metric, day) — daily rollup wins, else SUM for accumulative metrics
+   (steps/distance/calories/minutes/sleep), else latest sample. Used by
+   `/health/metrics` and `/health/reports/overview` (dashboard + reports pages).
+3. Ingest (`app/services/scheduler.py`): `_upsert_metric()` updates existing points
+   instead of inserting duplicates; a `daily` row now deletes that day's superseded
+   `raw` rows immediately at sync time.
+
 ## ~~Seed Google Credentials from environment variables when present~~ — DONE (2026-08-14)
 
 Implemented in `app/main.py` lifespan: on startup, if `GOOGLE_CLIENT_ID` +

@@ -632,36 +632,70 @@ IMPORTANT:
     if not base_url.endswith("/v1"):
         base_url = f"{base_url}/v1"
 
-    async with httpx.AsyncClient(timeout=120.0, verify=settings.llm_ssl_verify) as client:
-        response = await client.post(
-            f"{base_url}/chat/completions",
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {config['api_key']}",
+    request_payload = {
+        "model": config["model"],
+        "messages": [
+            {
+                "role": "system",
+                "content": "You are a clinical data specialist. Return valid JSON only — no markdown, no code fences, no explanation.",
             },
-            json={
-                "model": config["model"],
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": "You are a clinical data specialist. Return valid JSON only — no markdown, no code fences, no explanation.",
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                "temperature": 0.2,
-                "max_tokens": 16384,
-            },
-        )
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.2,
+        "max_tokens": 16384,
+    }
 
-    if response.status_code != 200:
-        raise HTTPException(
-            status_code=502,
-            detail=f"LLM returned {response.status_code}: {response.text[:500]}"
-        )
+    # Some providers (especially reasoning models behind OpenRouter) occasionally
+    # return HTTP 200 with an empty `content` field while spending the completion
+    # budget on reasoning tokens. Retry a few times before giving up.
+    max_attempts = 3
+    response = None
+    last_empty_detail = "LLM returned empty response"
 
-    content = response.json().get("choices", [{}])[0].get("message", {}).get("content", "")
-    if not content:
-        raise HTTPException(status_code=502, detail="LLM returned empty response")
+    async with httpx.AsyncClient(timeout=300.0, verify=settings.llm_ssl_verify) as client:
+        for attempt in range(1, max_attempts + 1):
+            response = await client.post(
+                f"{base_url}/chat/completions",
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {config['api_key']}",
+                },
+                json=request_payload,
+            )
+
+            if response.status_code != 200:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"LLM returned {response.status_code}: {response.text[:500]}"
+                )
+
+            try:
+                payload = response.json()
+            except json.JSONDecodeError:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"LLM returned non-JSON response: {response.text[:300]}"
+                )
+
+            choice = (payload.get("choices") or [{}])[0]
+            message = choice.get("message") or {}
+            content = message.get("content") or ""
+
+            if content.strip():
+                break
+
+            usage = payload.get("usage") or {}
+            completion_tokens = usage.get("completion_tokens")
+            finish_reason = choice.get("finish_reason")
+            last_empty_detail = (
+                f"LLM returned empty response "
+                f"(attempt {attempt}/{max_attempts}, finish_reason={finish_reason}, "
+                f"completion_tokens={completion_tokens})"
+            )
+            logger.warning(last_empty_detail)
+        else:
+            # Loop exhausted with empty content on every attempt.
+            raise HTTPException(status_code=502, detail=last_empty_detail)
 
     # Parse JSON
     try:
@@ -673,8 +707,8 @@ IMPORTANT:
     except json.JSONDecodeError:
         pass
 
-    cleaned = re.sub(r"^```(?:json)?\\s*", "", content.strip())
-    cleaned = re.sub(r"\\s*```$", "", cleaned)
+    cleaned = re.sub(r"^```(?:json)?\s*", "", content.strip())
+    cleaned = re.sub(r"\s*```$", "", cleaned)
     try:
         parsed = json.loads(cleaned)
         return parsed if isinstance(parsed, list) else parsed.get("definitions", [])

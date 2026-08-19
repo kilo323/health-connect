@@ -31,6 +31,7 @@ class HealthMetric(Base):
     recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     source: Mapped[str] = mapped_column(String(100))  # "google_health_connect", "manual", "document_analysis"
     source_document: Mapped[str | None] = mapped_column(String(255), nullable=True)  # filename if imported from document
+    granularity: Mapped[str] = mapped_column(String(20), default="raw", nullable=False)  # "raw" (granular point/interval) or "daily" (authoritative daily aggregate)
     definition_id: Mapped[int | None] = mapped_column(ForeignKey("metric_definitions.id"), nullable=True)  # link to canonical definition
     reference_range: Mapped[str | None] = mapped_column(String(200), nullable=True)  # e.g. "70-99 mg/dL" from the source document
     created_at: Mapped[datetime] = mapped_column(

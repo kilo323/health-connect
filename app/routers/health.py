@@ -31,6 +31,82 @@ router = APIRouter(prefix="/health", tags=["Health Data"])
 logger = logging.getLogger(__name__)
 
 
+# Metrics that accumulate over the day: within the rollup cutoff window they
+# sync as many small raw interval rows, so same-day rows must be SUMMED into a
+# single daily total. Everything else (weight, heart rate, labs, ...) is a
+# snapshot where the latest sample per day is the representative value.
+_SUMMABLE_METRIC_KEYWORDS = ("steps", "distance", "calories", "minutes", "sleep")
+
+
+def _is_summable_metric(metric_type: str) -> bool:
+    t = (metric_type or "").lower()
+    return any(k in t for k in _SUMMABLE_METRIC_KEYWORDS)
+
+
+async def _daily_metric_values(
+    db: AsyncSession,
+    user_id: int,
+    metric_type: str | None = None,
+    start_date: datetime | None = None,
+    year: int | None = None,
+) -> list[dict]:
+    """Compute one representative value per (metric_type, calendar day).
+
+    Aggregation rules:
+    - If a day has a `daily` rollup row, that value is authoritative for the day
+      (same-day granular rows are ignored — they were superseded at ingest).
+    - Otherwise, summable metrics (steps, distance, calories, minutes, sleep)
+      SUM all same-day granular rows into a daily total, while snapshot metrics
+      (weight, heart rate, labs, ...) keep the latest sample of the day.
+
+    Returns dicts sorted by recorded_at (newest first):
+      {"metric_type", "day", "value", "recorded_at", "row"} where `row` is the
+      representative HealthMetric carrying unit/source metadata.
+    """
+    filters = [HealthMetric.user_id == user_id]
+    if metric_type:
+        filters.append(HealthMetric.metric_type == metric_type)
+    if start_date is not None:
+        filters.append(HealthMetric.recorded_at >= start_date)
+
+    result = await db.execute(
+        select(HealthMetric).where(*filters).order_by(HealthMetric.recorded_at.asc())
+    )
+    rows = result.scalars().all()
+
+    groups: dict[tuple[str, str], list[HealthMetric]] = {}
+    for m in rows:
+        if not m.recorded_at:
+            continue
+        if year is not None and m.recorded_at.year != year:
+            continue
+        day = m.recorded_at.strftime("%Y-%m-%d")
+        groups.setdefault((m.metric_type, day), []).append(m)
+
+    out: list[dict] = []
+    for (mtype, day), ms in groups.items():
+        daily_rows = [m for m in ms if getattr(m, "granularity", "raw") == "daily"]
+        if daily_rows:
+            rep = max(daily_rows, key=lambda m: m.id)
+            value = rep.value
+        elif _is_summable_metric(mtype):
+            rep = max(ms, key=lambda m: (m.recorded_at, m.id))
+            value = float(sum(m.value for m in ms))
+        else:
+            rep = max(ms, key=lambda m: (m.recorded_at, m.id))
+            value = rep.value
+        out.append({
+            "metric_type": mtype,
+            "day": day,
+            "value": value,
+            "recorded_at": rep.recorded_at,
+            "row": rep,
+        })
+
+    out.sort(key=lambda r: r["recorded_at"], reverse=True)
+    return out
+
+
 def _extract_document_content(document: "Document") -> tuple[str, str | list[str]]:
     """Extract content from a document for LLM analysis.
 
@@ -120,45 +196,31 @@ async def list_all_metrics(
     db: AsyncSession = Depends(get_db)
 ):
     """Get all health metrics for the current user, optionally filtered by type and year"""
-    from sqlalchemy import func
-    # Build base filter
-    base_filters = [HealthMetric.user_id == current_user.id]
-    if metric_type:
-        base_filters.append(HealthMetric.metric_type == metric_type)
-    if year:
-        base_filters.append(func.strftime('%Y', HealthMetric.recorded_at) == str(year))
-
-    # Deduplicate by taking latest per metric_type per day
-    subq = (
-        select(
-            HealthMetric.metric_type,
-            func.date(HealthMetric.recorded_at).label('day'),
-            func.max(HealthMetric.id).label('max_id'),
-        )
-        .where(*base_filters)
-        .group_by(HealthMetric.metric_type, func.date(HealthMetric.recorded_at))
-        .subquery()
+    daily = await _daily_metric_values(
+        db,
+        user_id=current_user.id,
+        metric_type=metric_type,
+        start_date=None,
+        year=year,
     )
-    query = select(HealthMetric).where(HealthMetric.id == subq.c.max_id)
-    query = query.order_by(HealthMetric.recorded_at.desc()).limit(limit)
 
-    result = await db.execute(query)
-    metrics = result.scalars().all()
-
-    return [
-        HealthMetricResponse(
-            id=m.id,
-            user_id=m.user_id,
-            metric_type=m.metric_type,
-            value=m.value,
-            unit=m.unit,
-            recorded_at=m.recorded_at,
-            source=m.source,
-            source_document=m.source_document,
-            created_at=m.created_at
+    out: list[HealthMetricResponse] = []
+    for d in daily[:limit]:
+        rep = d["row"]
+        out.append(
+            HealthMetricResponse(
+                id=rep.id,
+                user_id=rep.user_id,
+                metric_type=d["metric_type"],
+                value=d["value"],
+                unit=rep.unit,
+                recorded_at=rep.recorded_at,
+                source=rep.source,
+                source_document=rep.source_document,
+                created_at=rep.created_at
+            )
         )
-        for m in metrics
-    ]
+    return out
 
 
 @router.get("/metrics/definitions", response_model=List[MetricDefinitionResponse])
@@ -426,112 +488,63 @@ async def get_report_overview(
     db: AsyncSession = Depends(get_db)
 ):
     """Get health report overview with latest values, trends, and time series data"""
-    from sqlalchemy import func as sa_func, and_
     from datetime import timedelta
 
     try:
         now = datetime.now(timezone.utc)
         user_id = current_user.id
         # days == 0 is a sentinel for "all time"; otherwise apply a date window
+        # (to the time series; summary cards always show the latest values).
         start_date = now - timedelta(days=days) if days > 0 else None
 
-        # Get latest value per metric type (by most recent recorded_at, breaking ties with max id)
-        max_date_subq = (
-            select(
-                HealthMetric.metric_type,
-                sa_func.max(HealthMetric.recorded_at).label("max_recorded_at"),
-            )
-            .where(HealthMetric.user_id == user_id)
-            .group_by(HealthMetric.metric_type)
-            .subquery()
-        )
-        # For metrics with multiple entries on the same latest date, pick the one with the highest id
-        max_id_subq = (
-            select(
-                HealthMetric.metric_type,
-                sa_func.max(HealthMetric.id).label("max_id"),
-            )
-            .select_from(HealthMetric)
-            .join(
-                max_date_subq,
-                and_(
-                    HealthMetric.metric_type == max_date_subq.c.metric_type,
-                    HealthMetric.recorded_at == max_date_subq.c.max_recorded_at,
-                ),
-            )
-            .where(HealthMetric.user_id == user_id)
-            .group_by(HealthMetric.metric_type)
-            .subquery()
-        )
-        latest_result = await db.execute(
-            select(HealthMetric).join(max_id_subq, HealthMetric.id == max_id_subq.c.max_id)
-        )
-        latest_metrics = latest_result.scalars().all()
+        # One representative daily value per metric type (sums granular rows for
+        # accumulative metrics, prefers daily rollups, latest sample otherwise).
+        daily_values = await _daily_metric_values(db, user_id=user_id)
 
-        # Get time series data for the requested period
-        ts_filters = [HealthMetric.user_id == user_id]
-        if start_date is not None:
-            ts_filters.append(HealthMetric.recorded_at >= start_date)
-        ts_result = await db.execute(
-            select(HealthMetric)
-            .where(*ts_filters)
-            .order_by(HealthMetric.recorded_at.asc())
-        )
-        all_metrics = ts_result.scalars().all()
+        def _as_utc(dt):
+            """Normalize to tz-aware UTC (SQLite rows may be naive)."""
+            if dt is None:
+                return None
+            return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
 
-        # Group time series by metric type and date
-        by_type: dict[str, list] = {}
-        for m in all_metrics:
-            by_type.setdefault(m.metric_type, []).append(m)
+        # Group by metric type
+        by_type: dict[str, list[dict]] = {}
+        for d in daily_values:
+            d["_ts"] = _as_utc(d["recorded_at"])
+            by_type.setdefault(d["metric_type"], []).append(d)
 
-        # Build time series (daily values) for charting
+        # Time series for the requested period, sorted by date
         time_series: dict[str, list] = {}
-        for metric_type, metrics in by_type.items():
-            daily: dict[str, dict] = {}
-            for m in metrics:
-                if not m.recorded_at:
-                    continue
-                day_key = m.recorded_at.strftime("%Y-%m-%d")
-                if day_key not in daily or m.recorded_at > daily[day_key]["_ts"]:
-                    daily[day_key] = {
-                        "date": day_key,
-                        "value": m.value,
-                        "unit": m.unit or "",
-                        "source": m.source or "",
-                        "_ts": m.recorded_at,
-                    }
-            # Remove internal _ts field and sort
+        for metric_type, ds in by_type.items():
             time_series[metric_type] = sorted(
-                [{"date": v["date"], "value": v["value"], "unit": v["unit"], "source": v["source"]} for v in daily.values()],
+                (
+                    {
+                        "date": d["day"],
+                        "value": d["value"],
+                        "unit": d["row"].unit or "",
+                        "source": d["row"].source or "",
+                    }
+                    for d in ds
+                    if d["_ts"] is not None and (start_date is None or d["_ts"] >= start_date)
+                ),
                 key=lambda x: x["date"],
             )
 
-        # Build summary cards
+        # ── Summary cards: latest daily value + 7d trend ─────────────────────
+        week_ago = now - timedelta(days=7)
+        two_weeks_ago = now - timedelta(days=14)
+
         summary = []
-        for m in latest_metrics:
-            week_ago = now - timedelta(days=7)
-            two_weeks_ago = now - timedelta(days=14)
+        for metric_type, ds in by_type.items():
+            ordered = sorted(ds, key=lambda v: v["_ts"])
+            if not ordered:
+                continue
+            latest = ordered[-1]
 
-            recent_result = await db.execute(
-                select(sa_func.avg(HealthMetric.value))
-                .where(
-                    HealthMetric.user_id == user_id,
-                    HealthMetric.metric_type == m.metric_type,
-                    HealthMetric.recorded_at >= week_ago,
-                )
-            )
-            recent_avg = recent_result.scalar()
-
-            prior_result = await db.execute(
-                select(sa_func.avg(HealthMetric.value))
-                .where(
-                    HealthMetric.user_id == user_id,
-                    HealthMetric.metric_type == m.metric_type,
-                    HealthMetric.recorded_at >= two_weeks_ago,
-                    HealthMetric.recorded_at < week_ago,
-                )
-            )
-            prior_avg = prior_result.scalar()
+            recent_vals = [v["value"] for v in ordered if v["_ts"] >= week_ago]
+            prior_vals = [v["value"] for v in ordered if two_weeks_ago <= v["_ts"] < week_ago]
+            recent_avg = sum(recent_vals) / len(recent_vals) if recent_vals else None
+            prior_avg = sum(prior_vals) / len(prior_vals) if prior_vals else None
 
             trend = None
             trend_pct = None
@@ -540,11 +553,11 @@ async def get_report_overview(
                 trend = "up" if trend_pct > 0 else "down" if trend_pct < 0 else "flat"
 
             summary.append({
-                "metric_type": m.metric_type,
-                "latest_value": m.value,
-                "unit": m.unit or "",
-                "recorded_at": m.recorded_at.isoformat() if m.recorded_at else None,
-                "date": m.recorded_at.strftime("%Y-%m-%d") if m.recorded_at else None,
+                "metric_type": metric_type,
+                "latest_value": latest["value"],
+                "unit": latest["row"].unit or "",
+                "recorded_at": latest["_ts"].isoformat() if latest["_ts"] else None,
+                "date": latest["day"],
                 "trend": trend,
                 "trend_pct": trend_pct,
                 "recent_avg": round(recent_avg, 2) if recent_avg else None,

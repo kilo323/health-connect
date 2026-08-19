@@ -1,6 +1,6 @@
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, func, delete
 from sqlalchemy.exc import IntegrityError
 import asyncio
 import logging
@@ -153,6 +153,59 @@ def _metric_rollup_cutoff(data_type: str, rollup_cfg: dict):
     return bool(m.get("enabled")), cutoff
 
 
+async def _upsert_metric(
+    db: AsyncSession,
+    *,
+    user_id: int,
+    metric_type: str,
+    value: float,
+    unit: str,
+    recorded_at,
+    source: str,
+    definition_id,
+    granularity: str,
+) -> bool:
+    """Insert a HealthMetric row, updating the existing row for the same logical
+    data point (user_id, metric_type, recorded_at, source) if one exists.
+
+    Returns True when a NEW row was created, False when an existing row was
+    refreshed. Upserting keeps re-synced values current (raw intervals can be
+    corrected by later syncs) instead of silently keeping a stale duplicate.
+    """
+    from ..models.health_data import HealthMetric
+
+    result = await db.execute(
+        select(HealthMetric).where(
+            HealthMetric.user_id == user_id,
+            HealthMetric.metric_type == metric_type,
+            HealthMetric.recorded_at == recorded_at,
+            HealthMetric.source == source,
+        )
+    )
+    existing = result.scalar_one_or_none()
+    if existing is not None:
+        existing.value = value
+        existing.unit = unit
+        existing.granularity = granularity
+        if definition_id is not None:
+            existing.definition_id = definition_id
+        await db.commit()
+        return False
+
+    db.add(HealthMetric(
+        user_id=user_id,
+        metric_type=metric_type,
+        value=value,
+        unit=unit,
+        recorded_at=recorded_at,
+        source=source,
+        definition_id=definition_id,
+        granularity=granularity,
+    ))
+    await db.commit()
+    return True
+
+
 async def sync_health_data(user_id: int, start_time, end_time, data_types: list[str] | None = None, settings_data: dict | None = None) -> int:
     """Fetch health data from the Google Health API and persist HealthMetric rows.
 
@@ -236,17 +289,39 @@ async def sync_health_data(user_id: int, start_time, end_time, data_types: list[
                             unit = UNIT_MAP.get(data_type, "unknown")
                             norm = await metric_normalizer.normalize(db, metric_label, unit)
                             definition_id = norm.definition.id if norm.definition else None
-                            db.add(HealthMetric(
+                            metric_type = norm.canonical_name if norm.definition else metric_label
+                            # Daily rollups and pre-aggregated rows (heart_rate A2)
+                            # are stored as authoritative daily values; everything
+                            # else is a granular point/interval row.
+                            row_granularity = "daily" if (
+                                granularity == "daily" or data_type == "heart_rate"
+                            ) else "raw"
+                            is_new = await _upsert_metric(
+                                db,
                                 user_id=user_id,
-                                metric_type=norm.canonical_name if norm.definition else metric_label,
+                                metric_type=metric_type,
                                 value=value,
                                 unit=unit,
                                 recorded_at=recorded_at,
                                 source="google_health_connect",
                                 definition_id=definition_id,
-                            ))
-                            await db.commit()
-                            saved_count += 1
+                                granularity=row_granularity,
+                            )
+                            if is_new:
+                                saved_count += 1
+                            # A daily aggregate supersedes that day's granular rows
+                            # (e.g. a cutoff change re-synced the day as rollup).
+                            if row_granularity == "daily":
+                                await db.execute(
+                                    delete(HealthMetric).where(
+                                        HealthMetric.user_id == user_id,
+                                        HealthMetric.metric_type == metric_type,
+                                        HealthMetric.source == "google_health_connect",
+                                        HealthMetric.granularity == "raw",
+                                        func.date(HealthMetric.recorded_at) == recorded_at.date(),
+                                    )
+                                )
+                                await db.commit()
                         except IntegrityError:
                             await db.rollback()  # duplicate — already synced
                         except Exception:
