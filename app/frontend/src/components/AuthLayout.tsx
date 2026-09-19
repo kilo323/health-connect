@@ -9,27 +9,37 @@ import { useRouter } from 'next/navigation';
 export default function AuthLayout({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const isAuthenticated = useAuthStore((state) => state.isAuthenticated);
-  const [hydrated, setHydrated] = useState(false);
+  const [ready, setReady] = useState(false);
 
   useEffect(() => {
-    // Zustand persist rehydrates asynchronously — wait for it
-    const unsub = useAuthStore.persist.onFinishHydration(() => {
-      setHydrated(true);
-    });
-    // If already hydrated (e.g. re-render), set immediately
-    if (useAuthStore.persist.hasHydrated()) {
-      setHydrated(true);
+    // Wait for Zustand persist to rehydrate from localStorage.
+    // In Zustand v5 the old onFinishHydration/hasHydrated helpers can
+    // fire out of order, so we check localStorage directly as a fallback.
+    const token = localStorage.getItem('token');
+    if (!token) {
+      router.push('/login');
+      setReady(true); // allow redirect effect to fire
+      return;
     }
-    return unsub;
-  }, []);
 
+    // Token exists — mark ready once Zustand has rehydrated the store
+    const tryReady = () => setReady(true);
+    if (useAuthStore.persist.hasHydrated()) {
+      tryReady();
+    } else {
+      const unsub = useAuthStore.persist.onFinishHydration(tryReady);
+      return unsub;
+    }
+  }, [router]);
+
+  // Redirect after hydration confirms the user is not authenticated
   useEffect(() => {
-    if (hydrated && !isAuthenticated) {
+    if (ready && !isAuthenticated) {
       router.push('/login');
     }
-  }, [hydrated, isAuthenticated, router]);
+  }, [ready, isAuthenticated, router]);
 
-  if (!hydrated) {
+  if (!ready) {
     return <div className="min-h-screen flex items-center justify-center">Loading...</div>;
   }
 
