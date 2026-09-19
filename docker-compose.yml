@@ -22,7 +22,7 @@ services:
       - METRIC_LLM_API_TOKEN=${METRIC_LLM_API_TOKEN:-}
       - METRIC_LLM_MODEL=${METRIC_LLM_MODEL:-}
       - DATABASE_URL=sqlite+aiosqlite:////app/data/health_tracker.db
-      - FERNET_KEY=${FERNET_KEY:-$(openssl rand -hex 32)}
+      - FERNET_KEY=${FERNET_KEY:-$(openssl rand -base64 32)}
       # Set to false to skip SSL cert verification on LLM API calls
       - LLM_SSL_VERIFY=${LLM_SSL_VERIFY:-true}
       # Google OAuth (app-level); used to seed google_oauth_config at startup when
