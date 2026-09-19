@@ -239,6 +239,7 @@ class GoogleHealthService:
         refreshed = False
         page_token: Optional[str] = None
         points: list[Dict[str, Any]] = []
+        page_count = 0
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             while True:
@@ -248,7 +249,7 @@ class GoogleHealthService:
                     "Content-Type": "application/json",
                 }
 
-                params: Dict[str, Any] = {}
+                params: Dict[str, Any] = {"pageSize": 1000}
                 if filter_expr is not None:
                     params["filter"] = filter_expr
                 if page_token:
@@ -264,7 +265,10 @@ class GoogleHealthService:
                     raise ValueError(f"Google Health API error ({response.status_code}): {self._error_message(response)}")
 
                 data = response.json()
-                points.extend(data.get("dataPoints", []))
+                batch = data.get("dataPoints", [])
+                points.extend(batch)
+                page_count += 1
+                logger.info(f"[{api_type}] page {page_count}: got {len(batch)} points (total {len(points)})")
 
                 page_token = data.get("nextPageToken") or None
                 if not page_token:

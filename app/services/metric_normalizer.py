@@ -249,18 +249,63 @@ class MetricNormalizer:
             select(HealthMetric).where(HealthMetric.definition_id.is_(None))
         )
         metrics = result.scalars().all()
-        updated = 0
 
+        # First pass: resolve normalizations and bucket by target name
+        to_update: list[tuple[HealthMetric, MetricDefinition, str]] = []  # (metric, definition, canonical_name)
         for m in metrics:
             norm = await self.normalize(db, m.metric_type, m.unit or "")
             if norm.definition is not None:
-                m.definition_id = norm.definition.id
-                m.metric_type = norm.canonical_name
+                to_update.append((m, norm.definition, norm.canonical_name))
+
+        if not to_update:
+            return 0
+
+        # Batch-check for unique-constraint conflicts: find already-mapped
+        # rows whose (user_id, target_metric_type, recorded_at, source)
+        # would collide with the rows we're about to update.
+        conflict_keys: set[tuple] = set()
+        by_target: dict[str, list[HealthMetric]] = {}
+        for m, _def, canonical in to_update:
+            by_target.setdefault(canonical, []).append(m)
+
+        for target_name, group in by_target.items():
+            user_ids = {m.user_id for m in group}
+            recorded_ats = {m.recorded_at for m in group}
+            sources = {m.source for m in group}
+            conflict_result = await db.execute(
+                select(
+                    HealthMetric.user_id,
+                    HealthMetric.recorded_at,
+                    HealthMetric.source,
+                ).where(
+                    HealthMetric.metric_type == target_name,
+                    HealthMetric.definition_id.is_not(None),
+                    HealthMetric.user_id.in_(user_ids),
+                    HealthMetric.recorded_at.in_(recorded_ats),
+                    HealthMetric.source.in_(sources),
+                )
+            )
+            for row in conflict_result.all():
+                conflict_keys.add((row[0], row[1], row[2]))
+
+        updated = 0
+        deleted = 0
+        for m, definition, canonical in to_update:
+            if (m.user_id, m.recorded_at, m.source) in conflict_keys:
+                await db.delete(m)
+                deleted += 1
+            else:
+                m.definition_id = definition.id
+                if m.metric_type != canonical:
+                    m.metric_type = canonical
                 updated += 1
 
-        if updated:
+        if updated or deleted:
             await db.commit()
-            logger.info(f"Retroactively normalized {updated} health metrics")
+            logger.info(
+                f"Retroactively normalized {updated} health metrics"
+                + (f", removed {deleted} duplicates" if deleted else "")
+            )
 
         return updated
 

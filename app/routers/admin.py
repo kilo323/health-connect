@@ -48,6 +48,13 @@ class RollupConfig(BaseModel):
     metrics: dict[str, MetricRollupSetting] = {}
 
 
+class MetricLLMConfig(BaseModel):
+    """Metric-library LLM configuration settings (separate from document LLM)."""
+    base_url: str = ""
+    api_key: str = ""
+    model: str = ""
+
+
 class FetchModelsRequest(BaseModel):
     """Request to fetch available models from an endpoint."""
     base_url: str
@@ -116,6 +123,64 @@ async def update_llm_config(
     await db.commit()
     logger.info("LLM configuration updated")
     return {"message": "LLM configuration updated successfully"}
+
+
+@router.get("/settings/metric-llm")
+async def get_metric_llm_config(
+    current_user: UserResponse = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Get metric-library LLM configuration settings."""
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    result = await db.execute(
+        select(AppSettings).where(AppSettings.key == "metric_llm_config")
+    )
+    config = result.scalar_one_or_none()
+
+    if config:
+        try:
+            return MetricLLMConfig(**json.loads(config.value))
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    # Fall back to .env / env vars
+    env_config = await _load_metric_llm_config()
+    return MetricLLMConfig(**env_config)
+
+
+@router.put("/settings/metric-llm")
+async def update_metric_llm_config(
+    config: MetricLLMConfig,
+    current_user: UserResponse = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Update metric-library LLM configuration settings."""
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    result = await db.execute(
+        select(AppSettings).where(AppSettings.key == "metric_llm_config")
+    )
+    existing = result.scalar_one_or_none()
+
+    settings_value = json.dumps(config.model_dump())
+
+    if existing:
+        existing.value = settings_value
+        existing.description = "Metric-library LLM configuration"
+    else:
+        new_setting = AppSettings(
+            key="metric_llm_config",
+            value=settings_value,
+            description="Metric-library LLM configuration"
+        )
+        db.add(new_setting)
+
+    await db.commit()
+    logger.info("Metric-library LLM configuration updated")
+    return {"message": "Metric-library LLM configuration updated successfully"}
 
 
 @router.get("/settings/schedule")
@@ -528,11 +593,30 @@ class MergeProposalRequest(BaseModel):
 
 
 async def _load_metric_llm_config() -> dict[str, str]:
-    """Load the metric-library LLM config from .env (METRIC_LLM_* > LLM_*).
+    """Load the metric-library LLM config.
 
-    This deliberately ignores shell environment variables so the admin UI
-    behaves consistently with the standalone refresh script.
+    Priority: DB (metric_llm_config) > .env (METRIC_LLM_* > LLM_*).
     """
+    # 1. Check DB first
+    try:
+        from ..database import async_session_factory
+        async with async_session_factory() as db:
+            result = await db.execute(
+                select(AppSettings).where(AppSettings.key == "metric_llm_config")
+            )
+            row = result.scalar_one_or_none()
+            if row:
+                cfg = json.loads(row.value)
+                if cfg.get("base_url") and cfg.get("api_key") and cfg.get("model"):
+                    return {
+                        "base_url": cfg["base_url"].rstrip("/"),
+                        "api_key": cfg["api_key"],
+                        "model": cfg["model"],
+                    }
+    except Exception:
+        pass
+
+    # 2. Fall back to .env file
     from pathlib import Path
     env_path = Path(__file__).resolve().parent.parent.parent / ".env"
     dotenv: dict[str, str] = {}
@@ -555,7 +639,10 @@ async def _load_metric_llm_config() -> dict[str, str]:
 
 
 async def _generate_metric_definitions(unmatched: list[dict], definitions: list[MetricDefinition]) -> list[dict]:
-    """Ask the LLM to generate definitions for unmatched metrics."""
+    """Ask the LLM to generate definitions for unmatched metrics.
+
+    Processes metrics in batches to avoid gateway timeouts on large sets.
+    """
     import httpx
     from ..config import settings
 
@@ -585,12 +672,25 @@ async def _generate_metric_definitions(unmatched: list[dict], definitions: list[
     if not truly_unmatched:
         return []
 
-    unmatched_text = "\n".join(
-        f'  - "{m["metric_type"]}" (unit: {m.get("unit") or "unknown"}, {m.get("count", 1)} record(s))'
-        for m in truly_unmatched
-    )
+    # Process in batches to avoid gateway timeouts on large prompt/response payloads.
+    BATCH_SIZE = 10
+    batches = [truly_unmatched[i:i + BATCH_SIZE] for i in range(0, len(truly_unmatched), BATCH_SIZE)]
+    logger.info(f"Generating metric proposals for {len(truly_unmatched)} unmatched metrics in {len(batches)} batch(es)")
 
-    prompt = f"""You are a clinical data specialist. I have health metrics extracted from medical documents that don't yet have definitions in my metric library.
+    base_url = config["base_url"]
+    if not base_url.endswith("/v1"):
+        base_url = f"{base_url}/v1"
+
+    all_results: list[dict] = []
+
+    async with httpx.AsyncClient(timeout=300.0, verify=settings.llm_ssl_verify) as client:
+        for batch_idx, batch in enumerate(batches, 1):
+            unmatched_text = "\n".join(
+                f'  - "{m["metric_type"]}" (unit: {m.get("unit") or "unknown"}, {m.get("count", 1)} record(s))'
+                for m in batch
+            )
+
+            prompt = f"""You are a clinical data specialist. I have health metrics extracted from medical documents that don't yet have definitions in my metric library.
 
 Here are the unmatched metrics:
 {unmatched_text}
@@ -628,92 +728,95 @@ IMPORTANT:
 - Be precise with units (mg/dL, ng/mL, g/dL, etc.)
 """
 
-    base_url = config["base_url"]
-    if not base_url.endswith("/v1"):
-        base_url = f"{base_url}/v1"
+            request_payload = {
+                "model": config["model"],
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You are a clinical data specialist. Return valid JSON only — no markdown, no code fences, no explanation.",
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                "temperature": 0.2,
+                "max_tokens": 8192,
+                "stream": True,
+            }
 
-    request_payload = {
-        "model": config["model"],
-        "messages": [
-            {
-                "role": "system",
-                "content": "You are a clinical data specialist. Return valid JSON only — no markdown, no code fences, no explanation.",
-            },
-            {"role": "user", "content": prompt},
-        ],
-        "temperature": 0.2,
-        "max_tokens": 16384,
-    }
+            # Use streaming to avoid gateway timeouts — the litellm proxy may
+            # 504 on a non-streaming request if the model is slow, but streaming
+            # keeps the connection alive with periodic SSE chunks.
+            max_attempts = 3
+            content = ""
+            last_empty_detail = "LLM returned empty response"
 
-    # Some providers (especially reasoning models behind OpenRouter) occasionally
-    # return HTTP 200 with an empty `content` field while spending the completion
-    # budget on reasoning tokens. Retry a few times before giving up.
-    max_attempts = 3
-    response = None
-    last_empty_detail = "LLM returned empty response"
+            for attempt in range(1, max_attempts + 1):
+                logger.info(f"Batch {batch_idx}/{len(batches)}: requesting definitions for {len(batch)} metrics (attempt {attempt})")
+                try:
+                    async with client.stream(
+                        "POST",
+                        f"{base_url}/chat/completions",
+                        headers={
+                            "Content-Type": "application/json",
+                            "Authorization": f"Bearer {config['api_key']}",
+                        },
+                        json=request_payload,
+                    ) as response:
+                        if response.status_code != 200:
+                            body = await response.aread()
+                            raise HTTPException(
+                                status_code=502,
+                                detail=f"LLM returned {response.status_code}: {body.decode()[:500]}"
+                            )
 
-    async with httpx.AsyncClient(timeout=300.0, verify=settings.llm_ssl_verify) as client:
-        for attempt in range(1, max_attempts + 1):
-            response = await client.post(
-                f"{base_url}/chat/completions",
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {config['api_key']}",
-                },
-                json=request_payload,
-            )
+                        content = ""
+                        async for line in response.aiter_lines():
+                            if not line.startswith("data: "):
+                                continue
+                            data = line[6:]
+                            if data.strip() == "[DONE]":
+                                break
+                            try:
+                                chunk = json.loads(data)
+                                delta = (chunk.get("choices") or [{}])[0].get("delta") or {}
+                                token = delta.get("content") or ""
+                                content += token
+                            except json.JSONDecodeError:
+                                continue
+                except httpx.ReadTimeout:
+                    logger.warning(f"Batch {batch_idx}: streaming read timeout (attempt {attempt})")
+                    last_empty_detail = f"LLM streaming read timeout (attempt {attempt})"
+                    continue
 
-            if response.status_code != 200:
-                raise HTTPException(
-                    status_code=502,
-                    detail=f"LLM returned {response.status_code}: {response.text[:500]}"
-                )
+                if content.strip():
+                    break
 
+                last_empty_detail = f"LLM returned empty streamed response (attempt {attempt})"
+                logger.warning(f"Batch {batch_idx}: {last_empty_detail}")
+            else:
+                raise HTTPException(status_code=502, detail=last_empty_detail)
+
+            # Parse JSON
             try:
-                payload = response.json()
+                parsed = json.loads(content)
+                if isinstance(parsed, list):
+                    all_results.extend(parsed)
+                elif isinstance(parsed, dict) and "definitions" in parsed:
+                    all_results.extend(parsed["definitions"])
             except json.JSONDecodeError:
-                raise HTTPException(
-                    status_code=502,
-                    detail=f"LLM returned non-JSON response: {response.text[:300]}"
-                )
+                cleaned = re.sub(r"^```(?:json)?\s*", "", content.strip())
+                cleaned = re.sub(r"\s*```$", "", cleaned)
+                try:
+                    parsed = json.loads(cleaned)
+                    if isinstance(parsed, list):
+                        all_results.extend(parsed)
+                    else:
+                        all_results.extend(parsed.get("definitions", []))
+                except json.JSONDecodeError as e:
+                    raise HTTPException(status_code=502, detail=f"Could not parse LLM response: {e}")
 
-            choice = (payload.get("choices") or [{}])[0]
-            message = choice.get("message") or {}
-            content = message.get("content") or ""
+            logger.info(f"Batch {batch_idx}/{len(batches)}: got {len(all_results)} total definitions so far")
 
-            if content.strip():
-                break
-
-            usage = payload.get("usage") or {}
-            completion_tokens = usage.get("completion_tokens")
-            finish_reason = choice.get("finish_reason")
-            last_empty_detail = (
-                f"LLM returned empty response "
-                f"(attempt {attempt}/{max_attempts}, finish_reason={finish_reason}, "
-                f"completion_tokens={completion_tokens})"
-            )
-            logger.warning(last_empty_detail)
-        else:
-            # Loop exhausted with empty content on every attempt.
-            raise HTTPException(status_code=502, detail=last_empty_detail)
-
-    # Parse JSON
-    try:
-        parsed = json.loads(content)
-        if isinstance(parsed, list):
-            return parsed
-        if isinstance(parsed, dict) and "definitions" in parsed:
-            return parsed["definitions"]
-    except json.JSONDecodeError:
-        pass
-
-    cleaned = re.sub(r"^```(?:json)?\s*", "", content.strip())
-    cleaned = re.sub(r"\s*```$", "", cleaned)
-    try:
-        parsed = json.loads(cleaned)
-        return parsed if isinstance(parsed, list) else parsed.get("definitions", [])
-    except json.JSONDecodeError as e:
-        raise HTTPException(status_code=502, detail=f"Could not parse LLM response: {e}")
+    return all_results
 
 
 @router.post("/metric-definitions/propose", response_model=ProposeDefinitionsResponse)
@@ -819,18 +922,38 @@ async def merge_metric_proposal(
         existing_aliases.update(a for a in aliases if a)
         definition.aliases = json.dumps(sorted(existing_aliases))
 
-        # Update unmatched metrics
+        # Update unmatched metrics (with conflict-safe dedup)
         metrics_result = await db.execute(
             select(HealthMetric).where(
                 HealthMetric.metric_type == raw,
                 HealthMetric.definition_id.is_(None),
             )
         )
+        to_update = metrics_result.scalars().all()
+        conflict_keys: set[tuple] = set()
+        if to_update:
+            user_ids = {m.user_id for m in to_update}
+            recorded_ats = {m.recorded_at for m in to_update}
+            sources = {m.source for m in to_update}
+            conflict_result = await db.execute(
+                select(HealthMetric.user_id, HealthMetric.recorded_at, HealthMetric.source).where(
+                    HealthMetric.metric_type == definition.name,
+                    HealthMetric.definition_id.is_not(None),
+                    HealthMetric.user_id.in_(user_ids),
+                    HealthMetric.recorded_at.in_(recorded_ats),
+                    HealthMetric.source.in_(sources),
+                )
+            )
+            conflict_keys = {(r[0], r[1], r[2]) for r in conflict_result.all()}
         updated = 0
-        for m in metrics_result.scalars().all():
-            m.definition_id = definition.id
-            m.metric_type = definition.name
-            updated += 1
+        for m in to_update:
+            if (m.user_id, m.recorded_at, m.source) in conflict_keys:
+                await db.delete(m)
+            else:
+                m.definition_id = definition.id
+                if m.metric_type != definition.name:
+                    m.metric_type = definition.name
+                updated += 1
 
         await db.commit()
         await db.refresh(definition)
@@ -860,16 +983,36 @@ async def merge_metric_proposal(
     await db.commit()
     await db.refresh(definition)
 
-    # Link unmatched metrics that use the raw name
+    # Link unmatched metrics that use the raw name (with conflict-safe dedup)
     metrics_result = await db.execute(
         select(HealthMetric).where(
             HealthMetric.metric_type == raw,
             HealthMetric.definition_id.is_(None),
         )
     )
-    for m in metrics_result.scalars().all():
-        m.definition_id = definition.id
-        m.metric_type = definition.name
+    to_link = metrics_result.scalars().all()
+    conflict_keys_link: set[tuple] = set()
+    if to_link:
+        user_ids_l = {m.user_id for m in to_link}
+        recorded_ats_l = {m.recorded_at for m in to_link}
+        sources_l = {m.source for m in to_link}
+        conflict_result_l = await db.execute(
+            select(HealthMetric.user_id, HealthMetric.recorded_at, HealthMetric.source).where(
+                HealthMetric.metric_type == definition.name,
+                HealthMetric.definition_id.is_not(None),
+                HealthMetric.user_id.in_(user_ids_l),
+                HealthMetric.recorded_at.in_(recorded_ats_l),
+                HealthMetric.source.in_(sources_l),
+            )
+        )
+        conflict_keys_link = {(r[0], r[1], r[2]) for r in conflict_result_l.all()}
+    for m in to_link:
+        if (m.user_id, m.recorded_at, m.source) in conflict_keys_link:
+            await db.delete(m)
+        else:
+            m.definition_id = definition.id
+            if m.metric_type != definition.name:
+                m.metric_type = definition.name
 
     await db.commit()
     metric_normalizer._loaded = False
@@ -1093,11 +1236,43 @@ async def map_unmatched_to_definition(
             HealthMetric.definition_id.is_(None),
         )
     )
+    metrics_to_update = metrics_result.scalars().all()
+
+    # Check for unique-constraint conflicts: rows that already exist with the
+    # target metric_type AND same (user_id, recorded_at, source).
+    conflict_keys: set[tuple] = set()
+    if metrics_to_update:
+        user_ids = {m.user_id for m in metrics_to_update}
+        recorded_ats = {m.recorded_at for m in metrics_to_update}
+        sources = {m.source for m in metrics_to_update}
+        conflict_result = await db.execute(
+            select(HealthMetric.user_id, HealthMetric.recorded_at, HealthMetric.source).where(
+                HealthMetric.metric_type == definition.name,
+                HealthMetric.definition_id.is_not(None),
+                HealthMetric.user_id.in_(user_ids),
+                HealthMetric.recorded_at.in_(recorded_ats),
+                HealthMetric.source.in_(sources),
+            )
+        )
+        conflict_keys = {(r[0], r[1], r[2]) for r in conflict_result.all()}
+
     updated = 0
-    for m in metrics_result.scalars().all():
-        m.definition_id = definition.id
-        m.metric_type = definition.name
-        updated += 1
+    deleted = 0
+    for m in metrics_to_update:
+        is_conflict = (m.user_id, m.recorded_at, m.source) in conflict_keys
+        if is_conflict:
+            # A row with the target metric_type already exists at this
+            # (user_id, recorded_at, source) – remove the duplicate rather
+            # than trying to update it (which would violate the unique index).
+            await db.delete(m)
+            deleted += 1
+        else:
+            # Safe to rename; only assign if the value actually changes to
+            # avoid SQLAlchemy marking the object dirty unnecessarily.
+            if m.metric_type != definition.name:
+                m.metric_type = definition.name
+            m.definition_id = definition.id
+            updated += 1
 
     await db.commit()
 
@@ -1105,11 +1280,12 @@ async def map_unmatched_to_definition(
     from ..services.metric_normalizer import metric_normalizer
     metric_normalizer._loaded = False
 
-    logger.info(f"Mapped '{metric_type}' -> '{definition.name}' (alias added, {updated} metrics updated)")
+    logger.info(f"Mapped '{metric_type}' -> '{definition.name}' (alias added, {updated} metrics updated, {deleted} duplicates removed)")
     return {
         "message": f"Mapped '{metric_type}' to '{definition.name}'",
         "alias_added": True,
         "metrics_updated": updated,
+        "duplicates_deleted": deleted,
     }
 
 

@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import AuthLayout from '@/components/AuthLayout';
-import { Bot, Save, Loader2, CheckCircle, AlertCircle, RefreshCw, FileText, RotateCcw } from 'lucide-react';
+import { Bot, Save, Loader2, CheckCircle, AlertCircle, RefreshCw, FileText, RotateCcw, FlaskConical } from 'lucide-react';
 import apiClient from '@/lib/api-client';
 
 interface LLMConfig {
@@ -33,9 +33,24 @@ export default function AdminLLMConfigPage() {
   const [promptError, setPromptError] = useState<string | null>(null);
   const [promptPath, setPromptPath] = useState('');
 
+  // Metric LLM config state
+  const [metricConfig, setMetricConfig] = useState<LLMConfig>({
+    base_url: '',
+    api_key: '',
+    model: '',
+  });
+  const [metricLoading, setMetricLoading] = useState(true);
+  const [metricSaving, setMetricSaving] = useState(false);
+  const [metricSaved, setMetricSaved] = useState(false);
+  const [metricModels, setMetricModels] = useState<string[]>([]);
+  const [metricFetchingModels, setMetricFetchingModels] = useState(false);
+  const [metricModelsError, setMetricModelsError] = useState<string | null>(null);
+  const [metricCustomModel, setMetricCustomModel] = useState('');
+
   useEffect(() => {
     loadConfig();
     loadPrompt();
+    loadMetricConfig();
   }, []);
 
   const loadConfig = async () => {
@@ -61,6 +76,17 @@ export default function AdminLLMConfigPage() {
       setPromptError('Failed to load prompt template');
     } finally {
       setPromptLoading(false);
+    }
+  };
+
+  const loadMetricConfig = async () => {
+    try {
+      const res = await apiClient.get('/admin/settings/metric-llm');
+      setMetricConfig(res.data || { base_url: '', api_key: '', model: '' });
+    } catch (error) {
+      console.error('Failed to load metric LLM config:', error);
+    } finally {
+      setMetricLoading(false);
     }
   };
 
@@ -93,6 +119,46 @@ export default function AdminLLMConfigPage() {
       setPromptError('Failed to reset prompt template');
     } finally {
       setPromptSaving(false);
+    }
+  };
+
+  const fetchMetricModels = useCallback(async () => {
+    if (!metricConfig.base_url || !metricConfig.api_key) {
+      setMetricModelsError('Please enter API Base URL and API Key first');
+      return;
+    }
+    setMetricFetchingModels(true);
+    setMetricModelsError(null);
+    try {
+      const res = await apiClient.get('/admin/llm/models', {
+        params: { base_url: metricConfig.base_url, api_key: metricConfig.api_key }
+      });
+      if (res.data.error) {
+        setMetricModelsError(res.data.error);
+        setMetricModels([]);
+      } else {
+        setMetricModels(res.data.models);
+        setMetricModelsError(null);
+      }
+    } catch (error) {
+      console.error('Failed to fetch metric models:', error);
+      setMetricModelsError('Failed to fetch models from endpoint');
+      setMetricModels([]);
+    } finally {
+      setMetricFetchingModels(false);
+    }
+  }, [metricConfig.base_url, metricConfig.api_key]);
+
+  const handleSaveMetric = async () => {
+    setMetricSaving(true);
+    try {
+      await apiClient.put('/admin/settings/metric-llm', metricConfig);
+      setMetricSaved(true);
+      setTimeout(() => setMetricSaved(false), 3000);
+    } catch (error) {
+      console.error('Failed to save metric LLM config:', error);
+    } finally {
+      setMetricSaving(false);
     }
   };
 
@@ -278,6 +344,132 @@ export default function AdminLLMConfigPage() {
           <p className="text-sm text-blue-700 mt-2 font-medium">
             ℹ️ The selected model must support <strong>vision</strong> (image input) to extract text from scanned PDFs and image uploads.
             Text-based PDFs and plain text files work with any model.
+          </p>
+        </div>
+      </div>
+
+      {/* Metric LLM Settings */}
+      <div className="card max-w-2xl mt-8">
+        <div className="flex items-center gap-3 mb-6">
+          <FlaskConical className="h-8 w-8 text-emerald-600" />
+          <div>
+            <h2 className="text-lg font-semibold text-gray-900">Metric Library LLM Settings</h2>
+            <p className="text-sm text-gray-500">
+              Configure a separate LLM for metric definition generation. Falls back to the document LLM above if left blank.
+            </p>
+          </div>
+        </div>
+
+        {metricSaved && (
+          <div className="bg-green-50 border border-green-200 rounded-lg p-3 mb-6 flex items-center gap-2">
+            <CheckCircle className="h-4 w-4 text-green-600" />
+            <span className="text-sm text-green-700">Metric LLM configuration saved successfully</span>
+          </div>
+        )}
+
+        {metricLoading ? (
+          <div className="flex items-center gap-2 py-8 text-gray-500">
+            <Loader2 className="h-4 w-4 animate-spin" /> Loading...
+          </div>
+        ) : (
+          <form onSubmit={(e) => { e.preventDefault(); handleSaveMetric(); }} className="space-y-5">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">API Base URL</label>
+              <input
+                type="url"
+                value={metricConfig.base_url}
+                onChange={(e) => setMetricConfig({ ...metricConfig, base_url: e.target.value })}
+                placeholder="https://api.openai.com/v1 (leave blank to use document LLM)"
+                className="input-field font-mono text-sm"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">API Key</label>
+              <input
+                type="password"
+                value={metricConfig.api_key}
+                onChange={(e) => setMetricConfig({ ...metricConfig, api_key: e.target.value })}
+                placeholder="sk-... (leave blank to use document LLM)"
+                className="input-field font-mono text-sm"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Model Name</label>
+              <div className="flex gap-2">
+                <select
+                  value={metricConfig.model}
+                  onChange={(e) => setMetricConfig({ ...metricConfig, model: e.target.value })}
+                  className="input-field flex-1"
+                  disabled={metricModels.length === 0 && !metricCustomModel}
+                >
+                  {metricModels.length > 0 ? (
+                    metricModels.map((m) => (
+                      <option key={m} value={m}>{m}</option>
+                    ))
+                  ) : (
+                    <option value="">{metricConfig.model || '— select —'}</option>
+                  )}
+                </select>
+                <button
+                  type="button"
+                  onClick={fetchMetricModels}
+                  disabled={metricFetchingModels || !metricConfig.base_url || !metricConfig.api_key}
+                  className="btn-secondary flex items-center gap-2 px-4 py-2"
+                  title="Fetch available models from endpoint"
+                >
+                  {metricFetchingModels ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <RefreshCw className="h-4 w-4" />
+                  )}
+                  Refresh
+                </button>
+              </div>
+              {metricModelsError && (
+                <p className="text-xs text-red-500 mt-1">{metricModelsError}</p>
+              )}
+              {metricModels.length > 0 && (
+                <p className="text-xs text-green-600 mt-1">
+                  Found {metricModels.length} model(s) from endpoint
+                </p>
+              )}
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Custom Model Name</label>
+              <input
+                type="text"
+                value={metricCustomModel}
+                onChange={(e) => {
+                  setMetricCustomModel(e.target.value);
+                  if (e.target.value) {
+                    setMetricConfig({ ...metricConfig, model: e.target.value });
+                  }
+                }}
+                placeholder="Enter custom model name (optional)"
+                className="input-field font-mono text-sm"
+              />
+            </div>
+
+            <button
+              type="submit"
+              disabled={metricSaving}
+              className="btn-primary flex items-center gap-2"
+            >
+              {metricSaving && <Loader2 className="h-4 w-4 animate-spin" />}
+              <Save className="h-4 w-4" /> Save Metric LLM Configuration
+            </button>
+          </form>
+        )}
+
+        <div className="mt-6 p-4 bg-gray-50 rounded-lg">
+          <AlertCircle className="h-4 w-4 text-yellow-600 mb-2" />
+          <p className="text-sm text-gray-700">
+            This LLM is used by the metric definition generator (e.g. <code className="bg-gray-100 px-1 rounded text-xs">refresh_metric_library.py</code>).
+            It can be a cheaper/faster model since it only generates structured JSON definitions.
+            Leave all fields blank to fall back to the document analysis LLM above, then to <code className="bg-gray-100 px-1 rounded text-xs">.env</code> variables.
           </p>
         </div>
       </div>

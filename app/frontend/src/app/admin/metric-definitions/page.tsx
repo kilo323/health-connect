@@ -230,7 +230,11 @@ export default function AdminMetricDefinitionsPage() {
         metric_type: metricType,
         definition_id: defId,
       });
-      showMessage('success', res.data.message);
+      const dupes = res.data.duplicates_deleted || 0;
+      const msg = dupes > 0
+        ? `${res.data.message} (${dupes} duplicate rows removed)`
+        : res.data.message;
+      showMessage('success', msg);
       await loadData();
     } catch (err: any) {
       showMessage('error', err.response?.data?.detail || 'Map failed');
