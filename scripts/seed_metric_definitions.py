@@ -48,6 +48,22 @@ EXTRA_DEFINITIONS = [
         "reference_ranges": "[]",
         "unit_conversions": "{}",
     },
+    {
+        # Google's activeZoneMinutes.heartRateZone yields bare zone names, so the
+        # sync stores "Heart Minutes (Cardio)" / "(Peak)" / "(Fat Burn)". The
+        # library defines Peak and Fat Burn but not Cardio, and normalize()'s
+        # SequenceMatcher fallback then silently maps Cardio onto Peak. Giving it
+        # an exact alias wins before the fuzzy pass ever runs.
+        "name": "Heart Minutes (Cardio)",
+        "category": "Activity",
+        "unit": "minutes",
+        "data_type": "float",
+        "description": "Time spent in the cardio heart-rate zone, from Google Health Connect.",
+        "aliases": ["Heart Minutes (Cardio)", "cardio heart minutes",
+                    "heart minutes cardio", "cardio minutes"],
+        "reference_ranges": "[]",
+        "unit_conversions": "{}",
+    },
 ]
 
 COLUMNS = ("name", "category", "unit", "data_type", "description",
