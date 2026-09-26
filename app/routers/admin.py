@@ -1,7 +1,7 @@
 """Admin settings router for LLM configuration and schedule management."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, File, UploadFile, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from pydantic import BaseModel
@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+from datetime import datetime, timezone
 
 from ..config import settings
 from ..database import get_db
@@ -141,11 +142,13 @@ async def get_metric_llm_config(
 
     if config:
         try:
-            return MetricLLMConfig(**json.loads(config.value))
+            cfg = json.loads(config.value)
+            if cfg.get("base_url") and cfg.get("api_key") and cfg.get("model"):
+                return MetricLLMConfig(**cfg)
         except (json.JSONDecodeError, TypeError):
             pass
 
-    # Fall back to .env / env vars
+    # Fall back to env / .env file / normal llm_config
     env_config = await _load_metric_llm_config()
     return MetricLLMConfig(**env_config)
 
@@ -367,6 +370,55 @@ async def sync_now(
     return {"message": "Sync started"}
 
 
+@router.post("/sync/backfill")
+async def backfill_sync(
+    current_user: UserResponse = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Reset the sync cursors for all users and trigger a full backfill (admin only).
+
+    Clears ``last_google_sync`` and the per-data-type ``type_cursors`` map from
+    each user's ``sync_settings_<id>`` row so that the next sync run re-fetches
+    the full ``sync_days_back`` window for every data type. This is useful when
+    sync has advanced a cursor without saving data (e.g. account not linked on
+    first run) or when a metric was misconfigured and needs re-reading.
+    """
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    import asyncio
+    from ..services.scheduler import scheduler
+
+    # Clear the cursors for all users who have sync settings
+    result = await db.execute(
+        select(AppSettings).where(AppSettings.key.like("sync_settings_%"))
+    )
+    settings_rows = result.scalars().all()
+    cleared = 0
+    for row in settings_rows:
+        try:
+            data = json.loads(row.value)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if "last_google_sync" in data or "type_cursors" in data:
+            data.pop("last_google_sync", None)
+            data.pop("type_cursors", None)
+            row.value = json.dumps(data)
+            cleared += 1
+    if cleared:
+        await db.commit()
+
+    logger.info(f"Backfill: cleared sync cursors for {cleared} user(s) by admin '{current_user.username}'")
+
+    # Trigger sync in the background
+    asyncio.create_task(scheduler._run_sync())
+    return {
+        "message": "Backfill started",
+        "users_reset": cleared,
+        "note": "The next sync will fetch the full sync_days_back window for each user.",
+    }
+
+
 @router.get("/sync/debug")
 async def debug_sync_task(
     current_user: UserResponse = Depends(get_current_user),
@@ -389,6 +441,77 @@ async def debug_sync_task(
             }
 
     return {"sync_in_progress": scheduler.sync_in_progress, "task_name": None, "stack": []}
+
+
+@router.get("/sync/compaction")
+async def get_compaction_settings(
+    current_user: UserResponse = Depends(get_current_user),
+):
+    """Return the raw-data retention window (admin only)."""
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    from ..services.compaction import (
+        DEFAULT_RAW_RETENTION_DAYS, RAW_RETENTION_DESCRIPTION, get_raw_retention_days,
+    )
+
+    days = await get_raw_retention_days()
+    return {
+        "raw_retention_days": days,
+        "default_raw_retention_days": DEFAULT_RAW_RETENTION_DAYS,
+        "description": RAW_RETENTION_DESCRIPTION,
+    }
+
+
+@router.put("/sync/compaction")
+async def update_compaction_settings(
+    payload: dict,
+    current_user: UserResponse = Depends(get_current_user),
+):
+    """Set how many days of non-rolled-up data to keep (admin only).
+
+    Older raw samples are compacted into a daily rollup and then deleted. Only
+    metrics with rollup enabled are touched. 0 keeps raw data forever.
+    """
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    if "raw_retention_days" not in payload:
+        raise HTTPException(status_code=400, detail="raw_retention_days is required")
+    try:
+        days = int(payload["raw_retention_days"])
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="raw_retention_days must be an integer")
+    if days < 0:
+        raise HTTPException(status_code=400, detail="raw_retention_days cannot be negative")
+    if days > 3650:
+        raise HTTPException(status_code=400, detail="raw_retention_days cannot exceed 3650")
+
+    from ..services.compaction import set_raw_retention_days
+
+    saved = await set_raw_retention_days(days)
+    return {"raw_retention_days": saved}
+
+
+@router.post("/sync/compact")
+async def run_compaction(
+    payload: dict | None = None,
+    current_user: UserResponse = Depends(get_current_user),
+):
+    """Compact raw Google samples into daily rollups and prune them (admin only).
+
+    The scheduler runs this nightly, but `scheduler.start()` returns early when
+    no schedule is configured, so this endpoint is the only way to run it in a
+    manual-sync setup. Pass ``{"dry_run": true}`` to preview without writing.
+    """
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    dry_run = bool((payload or {}).get("dry_run", False))
+    from ..services.compaction import compact_raw_metrics
+
+    summary = await compact_raw_metrics(dry_run=dry_run)
+    return summary
 
 
 @router.get("/llm/models")
@@ -495,6 +618,163 @@ async def update_google_oauth_config(
     return {"message": "Google OAuth configuration updated successfully"}
 
 
+# ─── App Settings import/export ─────────────────────────────────────────────
+
+_SENSITIVE_KEYS = frozenset({
+    "api_key", "access_token", "refresh_token", "client_secret",
+    "token", "secret", "password",
+})
+
+
+def _obfuscate(value: str) -> str:
+    """Mask a token-like string, keeping only the first/last 4 chars."""
+    if len(value) <= 8:
+        return "*" * len(value)
+    return f"{value[:4]}{'*' * (len(value) - 8)}{value[-4:]}"
+
+
+def _redact_value(value: str) -> str:
+    """Redact sensitive fields from a JSON-encoded setting value.
+
+    Non-JSON or plain values are returned untouched, so only token/API-key fields
+    embedded inside JSON payloads (e.g. llm_config, google_health_tokens_*) are
+    masked.
+    """
+    if not isinstance(value, str):
+        return str(value)
+    try:
+        data = json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        return value
+    if not isinstance(data, dict):
+        return value
+    redacted: dict = {}
+    for k, v in data.items():
+        if isinstance(v, str) and k.lower() in _SENSITIVE_KEYS:
+            redacted[k] = _obfuscate(v)
+        else:
+            redacted[k] = v
+    return json.dumps(redacted, ensure_ascii=False)
+
+
+class ImportResult(BaseModel):
+    """Result of an app_settings import operation."""
+    imported: int = 0
+    created: int = 0
+    updated: int = 0
+    errors: list[str] = []
+
+
+@router.post("/settings/import", response_model=ImportResult)
+async def import_app_settings(
+    file: UploadFile = File(...),
+    current_user: UserResponse = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Import app settings from a JSON file (admin only).
+
+    Accepts an ``app_settings.json`` export and upserts each entry into the
+    ``app_settings`` table by ``key``. Existing rows have their ``value``
+    (and ``description``) overwritten; entries with a key not yet present are
+    inserted. Accepts either the wrapped export format (an object with a
+    ``rows`` key) or a bare JSON array of setting objects.
+    """
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    content = await file.read()
+    try:
+        payload = json.loads(content)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON file: {exc}")
+
+    if isinstance(payload, dict) and "rows" in payload:
+        rows = payload["rows"]
+    elif isinstance(payload, list):
+        rows = payload
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Expected a JSON array of settings or an object with a 'rows' key",
+        )
+
+    if not isinstance(rows, list):
+        raise HTTPException(status_code=400, detail="'rows' must be a list")
+
+    result = ImportResult()
+
+    for idx, row in enumerate(rows):
+        if not isinstance(row, dict):
+            result.errors.append(f"Row {idx}: expected an object, got {type(row).__name__}")
+            continue
+        key = row.get("key")
+        value = row.get("value")
+        if key is None or value is None:
+            result.errors.append(f"Row {idx}: missing 'key' or 'value' field")
+            continue
+        description = row.get("description")
+
+        existing_result = await db.execute(
+            select(AppSettings).where(AppSettings.key == key)
+        )
+        existing = existing_result.scalar_one_or_none()
+        if existing:
+            existing.value = str(value)
+            if description is not None:
+                existing.description = description
+            result.updated += 1
+            action = "updated"
+        else:
+            db.add(AppSettings(key=key, value=str(value), description=description))
+            result.created += 1
+            action = "created"
+        logger.debug(
+            "app_settings import (%s): key=%s value=%s by admin '%s'",
+            action, key, _redact_value(str(value)), current_user.username,
+        )
+
+    await db.commit()
+    result.imported = result.created + result.updated
+    logger.info(
+        "Imported app_settings from %s: created=%d updated=%d errors=%d by admin '%s'",
+        file.filename, result.created, result.updated, len(result.errors),
+        current_user.username,
+    )
+    return result
+
+
+@router.get("/settings/app_settings_export")
+async def export_app_settings(
+    current_user: UserResponse = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Export all app_settings rows as an app_settings.json file (admin only)."""
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    result = await db.execute(select(AppSettings).order_by(AppSettings.key))
+    rows = [
+        {"id": row.id, "key": row.key, "value": row.value, "description": row.description}
+        for row in result.scalars().all()
+    ]
+
+    payload = {
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "table": "app_settings",
+        "row_count": len(rows),
+        "rows": rows,
+    }
+    body = json.dumps(payload, indent=2, ensure_ascii=False, default=str)
+    logger.info(
+        "Exported %d app_settings rows by admin '%s'", len(rows), current_user.username
+    )
+    return Response(
+        content=body,
+        media_type="application/json",
+        headers={"Content-Disposition": "attachment; filename=app_settings.json"},
+    )
+
+
 # ---------------------------------------------------------------------------
 # LLM Prompt management
 # ---------------------------------------------------------------------------
@@ -592,14 +872,178 @@ class MergeProposalRequest(BaseModel):
     merge_into_definition_id: Optional[int] = None
 
 
+class AcceptAllResult(BaseModel):
+    """Result of accepting all proposals at once."""
+    created: int = 0
+    merged: int = 0
+    skipped: int = 0
+    errors: list[str] = []
+
+
+class AcceptAllRequest(BaseModel):
+    """Request body for bulk-accepting proposals already generated by /propose."""
+    proposals: list[MergeProposalRequest] = []
+
+
+async def _apply_single_proposal(
+    db: AsyncSession, payload: MergeProposalRequest
+) -> MetricDefinition:
+    """Apply a single proposal: create new or merge into an existing definition.
+
+    Extracted from ``merge_metric_proposal`` so the same logic can be reused by
+    the bulk ``accept_all_proposals`` endpoint.
+    """
+    from ..services.metric_normalizer import check_definition_duplicate, metric_normalizer
+
+    raw = payload.raw_metric_type.strip()
+    aliases = [a for a in payload.aliases if a != raw]
+    if raw and raw.lower() != payload.name.lower():
+        aliases = [raw] + aliases
+
+    if payload.merge_into_definition_id:
+        result = await db.execute(
+            select(MetricDefinition).where(MetricDefinition.id == payload.merge_into_definition_id)
+        )
+        definition = result.scalar_one_or_none()
+        if not definition:
+            raise HTTPException(status_code=404, detail="Target definition not found")
+
+        existing_aliases = set(json.loads(definition.aliases or "[]"))
+        existing_aliases.update(a for a in aliases if a)
+        definition.aliases = json.dumps(sorted(existing_aliases))
+
+        metrics_result = await db.execute(
+            select(HealthMetric).where(
+                HealthMetric.metric_type == raw,
+                HealthMetric.definition_id.is_(None),
+            )
+        )
+        to_update = metrics_result.scalars().all()
+        conflict_keys: set[tuple] = set()
+        if to_update:
+            user_ids = {m.user_id for m in to_update}
+            recorded_ats = {m.recorded_at for m in to_update}
+            sources = {m.source for m in to_update}
+            conflict_result = await db.execute(
+                select(HealthMetric.user_id, HealthMetric.recorded_at, HealthMetric.source).where(
+                    HealthMetric.metric_type == definition.name,
+                    HealthMetric.definition_id.is_not(None),
+                    HealthMetric.user_id.in_(user_ids),
+                    HealthMetric.recorded_at.in_(recorded_ats),
+                    HealthMetric.source.in_(sources),
+                )
+            )
+            conflict_keys = {(r[0], r[1], r[2]) for r in conflict_result.all()}
+        updated = 0
+        for m in to_update:
+            if (m.user_id, m.recorded_at, m.source) in conflict_keys:
+                await db.delete(m)
+            else:
+                m.definition_id = definition.id
+                if m.metric_type != definition.name:
+                    m.metric_type = definition.name
+                updated += 1
+
+        await db.commit()
+        await db.refresh(definition)
+        metric_normalizer._loaded = False
+        logger.info(f"Merged proposal '{raw}' into '{definition.name}' ({updated} metrics linked)")
+        return definition
+
+    # Creating a new definition
+    dup = await check_definition_duplicate(db, payload.name, aliases)
+    if dup:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Duplicate: proposal matches existing definition '{dup.name}' (id={dup.id})",
+        )
+
+    definition = MetricDefinition(
+        name=payload.name,
+        category=payload.category,
+        unit=payload.unit,
+        data_type=payload.data_type,
+        description=payload.description,
+        aliases=json.dumps(aliases),
+        reference_ranges=json.dumps(payload.reference_ranges or []),
+        unit_conversions=json.dumps(payload.unit_conversions or {}),
+    )
+    db.add(definition)
+    await db.commit()
+    await db.refresh(definition)
+
+    metrics_result = await db.execute(
+        select(HealthMetric).where(
+            HealthMetric.metric_type == raw,
+            HealthMetric.definition_id.is_(None),
+        )
+    )
+    to_link = metrics_result.scalars().all()
+    conflict_keys_link: set[tuple] = set()
+    if to_link:
+        user_ids_l = {m.user_id for m in to_link}
+        recorded_ats_l = {m.recorded_at for m in to_link}
+        sources_l = {m.source for m in to_link}
+        conflict_result_l = await db.execute(
+            select(HealthMetric.user_id, HealthMetric.recorded_at, HealthMetric.source).where(
+                HealthMetric.metric_type == definition.name,
+                HealthMetric.definition_id.is_not(None),
+                HealthMetric.user_id.in_(user_ids_l),
+                HealthMetric.recorded_at.in_(recorded_ats_l),
+                HealthMetric.source.in_(sources_l),
+            )
+        )
+        conflict_keys_link = {(r[0], r[1], r[2]) for r in conflict_result_l.all()}
+    for m in to_link:
+        if (m.user_id, m.recorded_at, m.source) in conflict_keys_link:
+            await db.delete(m)
+        else:
+            m.definition_id = definition.id
+            if m.metric_type != definition.name:
+                m.metric_type = definition.name
+
+    await db.commit()
+    metric_normalizer._loaded = False
+    logger.info(f"Created metric definition from proposal: {definition.name}")
+    return definition
+
+
 async def _load_metric_llm_config() -> dict[str, str]:
     """Load the metric-library LLM config.
 
-    Priority: DB (metric_llm_config) > .env (METRIC_LLM_* > LLM_*).
+    Priority:
+      1. DB metric_llm_config (if all fields populated)
+      2. DB llm_config (the normal/document LLM — so the metric LLM mirrors the
+         document LLM when metric-specific config is empty)
+      3. OS environment variables / .env file (METRIC_LLM_* > LLM_*)
     """
-    # 1. Check DB first
+    from ..database import async_session_factory
+    from pathlib import Path
+
+    def _parse_dotenv() -> dict[str, str]:
+        env_path = Path(__file__).resolve().parent.parent.parent / ".env"
+        if not env_path.exists():
+            return {}
+        dotenv: dict[str, str] = {}
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            dotenv[key.strip()] = value.strip().strip('"').strip("'")
+        return dotenv
+
+    def _env_get(dotenv: dict[str, str], metric_key: str, fallback_key: str) -> str:
+        return (
+            os.getenv(metric_key)
+            or os.getenv(fallback_key)
+            or dotenv.get(metric_key)
+            or dotenv.get(fallback_key)
+            or ""
+        )
+
+    # 1. DB metric_llm_config
     try:
-        from ..database import async_session_factory
         async with async_session_factory() as db:
             result = await db.execute(
                 select(AppSettings).where(AppSettings.key == "metric_llm_config")
@@ -616,26 +1060,43 @@ async def _load_metric_llm_config() -> dict[str, str]:
     except Exception:
         pass
 
-    # 2. Fall back to .env file
-    from pathlib import Path
-    env_path = Path(__file__).resolve().parent.parent.parent / ".env"
-    dotenv: dict[str, str] = {}
-    if env_path.exists():
-        for line in env_path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, _, value = line.partition("=")
-            dotenv[key.strip()] = value.strip().strip('"').strip("'")
+    # 2. DB llm_config (normal/document LLM config — fallback so metric LLM mirrors it)
+    try:
+        async with async_session_factory() as db:
+            result = await db.execute(
+                select(AppSettings).where(AppSettings.key == "llm_config")
+            )
+            llm_row = result.scalar_one_or_none()
+            if llm_row:
+                llm_cfg = json.loads(llm_row.value)
+                if llm_cfg.get("base_url") and llm_cfg.get("api_key") and llm_cfg.get("model"):
+                    return {
+                        "base_url": llm_cfg["base_url"].rstrip("/"),
+                        "api_key": llm_cfg["api_key"],
+                        "model": llm_cfg["model"],
+                    }
+    except Exception:
+        pass
 
-    def _get(metric_key: str, fallback_key: str) -> str:
-        return dotenv.get(metric_key) or dotenv.get(fallback_key) or ""
-
+    # 3. OS env vars (METRIC_LLM_* > LLM_*), with .env file as last resort
+    dotenv = _parse_dotenv()
     return {
-        "base_url": _get("METRIC_LLM_URL", "LLM_URL").rstrip("/"),
-        "api_key": _get("METRIC_LLM_API_TOKEN", "LLM_API_TOKEN"),
-        "model": _get("METRIC_LLM_MODEL", "LLM_MODEL"),
+        "base_url": _env_get(dotenv, "METRIC_LLM_URL", "LLM_URL").rstrip("/"),
+        "api_key": _env_get(dotenv, "METRIC_LLM_API_TOKEN", "LLM_API_TOKEN"),
+        "model": _env_get(dotenv, "METRIC_LLM_MODEL", "LLM_MODEL"),
     }
+
+
+def _unit_of(unmatched: list[dict], metric_type: str) -> str:
+    """The unit actually recorded for an unmatched metric type.
+
+    The DB value is more trustworthy than the LLM's proposed unit, and it is what
+    the duplicate-suggestion gate needs in order to reject pairings like kg->bpm.
+    """
+    for um in unmatched:
+        if um.get("metric_type") == metric_type:
+            return (um.get("unit") or "").strip()
+    return ""
 
 
 async def _generate_metric_definitions(unmatched: list[dict], definitions: list[MetricDefinition]) -> list[dict]:
@@ -862,9 +1323,11 @@ async def propose_metric_definitions(
                     best_score = score
                     raw_metric_type = um["metric_type"]
 
-        similar_def, similarity_score = metric_normalizer.find_similar_definition(name)
+        similar_def, similarity_score = metric_normalizer.find_similar_definition(
+            name, unit=entry.get("unit") or _unit_of(unmatched, raw_metric_type))
         if not similar_def and raw_metric_type:
-            similar_def, similarity_score = metric_normalizer.find_similar_definition(raw_metric_type)
+            similar_def, similarity_score = metric_normalizer.find_similar_definition(
+                raw_metric_type, unit=_unit_of(unmatched, raw_metric_type))
 
         # Include the raw name as an alias if the LLM forgot it
         if raw_metric_type and raw_metric_type not in aliases:
@@ -903,121 +1366,54 @@ async def merge_metric_proposal(
     if current_user.role != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
 
-    from ..services.metric_normalizer import check_definition_duplicate, metric_normalizer
-
-    raw = payload.raw_metric_type.strip()
-    aliases = [a for a in payload.aliases if a != raw]
-    if raw and raw.lower() != payload.name.lower():
-        aliases = [raw] + aliases
-
-    if payload.merge_into_definition_id:
-        result = await db.execute(
-            select(MetricDefinition).where(MetricDefinition.id == payload.merge_into_definition_id)
-        )
-        definition = result.scalar_one_or_none()
-        if not definition:
-            raise HTTPException(status_code=404, detail="Target definition not found")
-
-        existing_aliases = set(json.loads(definition.aliases or "[]"))
-        existing_aliases.update(a for a in aliases if a)
-        definition.aliases = json.dumps(sorted(existing_aliases))
-
-        # Update unmatched metrics (with conflict-safe dedup)
-        metrics_result = await db.execute(
-            select(HealthMetric).where(
-                HealthMetric.metric_type == raw,
-                HealthMetric.definition_id.is_(None),
-            )
-        )
-        to_update = metrics_result.scalars().all()
-        conflict_keys: set[tuple] = set()
-        if to_update:
-            user_ids = {m.user_id for m in to_update}
-            recorded_ats = {m.recorded_at for m in to_update}
-            sources = {m.source for m in to_update}
-            conflict_result = await db.execute(
-                select(HealthMetric.user_id, HealthMetric.recorded_at, HealthMetric.source).where(
-                    HealthMetric.metric_type == definition.name,
-                    HealthMetric.definition_id.is_not(None),
-                    HealthMetric.user_id.in_(user_ids),
-                    HealthMetric.recorded_at.in_(recorded_ats),
-                    HealthMetric.source.in_(sources),
-                )
-            )
-            conflict_keys = {(r[0], r[1], r[2]) for r in conflict_result.all()}
-        updated = 0
-        for m in to_update:
-            if (m.user_id, m.recorded_at, m.source) in conflict_keys:
-                await db.delete(m)
-            else:
-                m.definition_id = definition.id
-                if m.metric_type != definition.name:
-                    m.metric_type = definition.name
-                updated += 1
-
-        await db.commit()
-        await db.refresh(definition)
-        metric_normalizer._loaded = False
-        logger.info(f"Merged proposal '{raw}' into '{definition.name}' ({updated} metrics linked)")
-        return definition
-
-    # Creating a new definition
-    dup = await check_definition_duplicate(db, payload.name, aliases)
-    if dup:
-        raise HTTPException(
-            status_code=409,
-            detail=f"Duplicate: proposal matches existing definition '{dup.name}' (id={dup.id})"
-        )
-
-    definition = MetricDefinition(
-        name=payload.name,
-        category=payload.category,
-        unit=payload.unit,
-        data_type=payload.data_type,
-        description=payload.description,
-        aliases=json.dumps(aliases),
-        reference_ranges=json.dumps(payload.reference_ranges or []),
-        unit_conversions=json.dumps(payload.unit_conversions or {}),
-    )
-    db.add(definition)
-    await db.commit()
-    await db.refresh(definition)
-
-    # Link unmatched metrics that use the raw name (with conflict-safe dedup)
-    metrics_result = await db.execute(
-        select(HealthMetric).where(
-            HealthMetric.metric_type == raw,
-            HealthMetric.definition_id.is_(None),
-        )
-    )
-    to_link = metrics_result.scalars().all()
-    conflict_keys_link: set[tuple] = set()
-    if to_link:
-        user_ids_l = {m.user_id for m in to_link}
-        recorded_ats_l = {m.recorded_at for m in to_link}
-        sources_l = {m.source for m in to_link}
-        conflict_result_l = await db.execute(
-            select(HealthMetric.user_id, HealthMetric.recorded_at, HealthMetric.source).where(
-                HealthMetric.metric_type == definition.name,
-                HealthMetric.definition_id.is_not(None),
-                HealthMetric.user_id.in_(user_ids_l),
-                HealthMetric.recorded_at.in_(recorded_ats_l),
-                HealthMetric.source.in_(sources_l),
-            )
-        )
-        conflict_keys_link = {(r[0], r[1], r[2]) for r in conflict_result_l.all()}
-    for m in to_link:
-        if (m.user_id, m.recorded_at, m.source) in conflict_keys_link:
-            await db.delete(m)
-        else:
-            m.definition_id = definition.id
-            if m.metric_type != definition.name:
-                m.metric_type = definition.name
-
-    await db.commit()
-    metric_normalizer._loaded = False
-    logger.info(f"Created metric definition from proposal: {definition.name}")
+    definition = await _apply_single_proposal(db, payload)
     return definition
+
+
+@router.post("/metric-definitions/accept-all-proposals", response_model=AcceptAllResult)
+async def accept_all_proposals(
+    request: AcceptAllRequest,
+    current_user: UserResponse = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Accept all previously-generated metric proposals at once (admin only).
+
+    Accepts a list of ``MergeProposalRequest`` objects (as produced by
+    ``/metric-definitions/propose``) and applies each one. Proposals whose
+    ``similarity_score`` suggests an existing match are merged into that
+    definition; others create a new definition. Returns a summary of
+    created/merged/skipped counts and any per-proposal errors.
+
+    The proposals should come from a prior call to ``/propose`` so the LLM is
+    not invoked again.
+    """
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    result = AcceptAllResult()
+
+    for payload in request.proposals:
+        merge_into_id = payload.merge_into_definition_id
+
+        try:
+            await _apply_single_proposal(db, payload)
+            if merge_into_id:
+                result.merged += 1
+            else:
+                result.created += 1
+        except HTTPException as exc:
+            if exc.status_code == 409:
+                result.skipped += 1
+            else:
+                result.errors.append(f"'{payload.raw_metric_type}': {exc.detail}")
+        except Exception as exc:
+            result.errors.append(f"'{payload.raw_metric_type}': {str(exc)}")
+
+    logger.info(
+        f"Accept-all proposals: created={result.created} merged={result.merged} "
+        f"skipped={result.skipped} errors={len(result.errors)} by admin '{current_user.username}'"
+    )
+    return result
 
 
 @router.get("/metric-definitions", response_model=list[MetricDefinitionResponse])

@@ -140,19 +140,42 @@ class MetricNormalizer:
             return []
         return sorted(set(d.name for d in self._definitions))
 
-    def find_similar_definition(self, metric_name: str) -> tuple[Optional[MetricDefinition], float]:
+    def find_similar_definition(
+        self,
+        metric_name: str,
+        unit: str = "",
+        min_score: float = _DUPLICATE_THRESHOLD,
+    ) -> tuple[Optional[MetricDefinition], float]:
         """Find the most similar existing definition by name or alias.
 
-        Returns the best-matching definition and its similarity score (0-1).
+        Returns the best-matching definition and its similarity score (0-1), or
+        ``(None, 0.0)`` when nothing plausible is found.
+
+        Two gates, because an unhelpful suggestion is worse than none: the admin
+        UI renders whatever comes back as a "Looks like X" badge plus a
+        "Merge into X" button, so returning the least-bad candidate regardless of
+        quality produced nonsense pairings — a `weight` measurement (kg) was
+        offered as "Average Heart Rate" (41.7%, matched on the alias
+        "resting heart rate") because SequenceMatcher always returns *some* score.
+
+        1. Score must reach `min_score` (defaults to _DUPLICATE_THRESHOLD).
+        2. If both the query and the candidate have a unit, they must be
+           compatible — equal, or the definition declares a conversion factor.
+           This is what rejects kg->bpm, %->minutes and degC->bpm.
         """
         if not self._loaded or not metric_name:
             return None, 0.0
 
         query = metric_name.strip().lower()
+        query_unit = (unit or "").strip()
         best_def: Optional[MetricDefinition] = None
         best_score = 0.0
 
         for d in self._definitions:
+            # Gate on unit before scoring: a weight measurement is not a
+            # heart rate no matter how similar the strings look.
+            if query_unit and d.unit and self._convert_unit(d, query_unit) is None:
+                continue
             candidates = [d.name.lower()]
             aliases = self._parse_json_field(d.aliases)
             if isinstance(aliases, list):
@@ -162,6 +185,13 @@ class MetricNormalizer:
                 if score > best_score:
                     best_score = score
                     best_def = d
+
+        if best_def is not None and best_score < min_score:
+            logger.info(
+                f"Suppressed duplicate suggestion '{metric_name}' -> "
+                f"'{best_def.name}' (score={best_score:.2f} < {min_score:.2f})"
+            )
+            return None, 0.0
 
         return best_def, best_score
 
