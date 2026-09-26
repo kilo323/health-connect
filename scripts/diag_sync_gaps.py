@@ -8,7 +8,7 @@ import sys
 from collections import defaultdict
 from datetime import datetime, timedelta
 
-DB = "data/health_tracker.db"
+DB = sys.argv[1] if len(sys.argv) > 1 else "data/health_tracker.db"
 
 con = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
 cur = con.cursor()
