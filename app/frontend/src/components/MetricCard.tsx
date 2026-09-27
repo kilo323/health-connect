@@ -10,6 +10,9 @@ export interface MetricCardProps {
   unit: string;
   formattedValue?: string; // Pre-formatted display string (e.g., "5'9\"" for compound units)
   displayUnit?: string; // Override unit display (e.g., "" to hide unit for compound units)
+  /** Day's min/max for avg_minmax metrics (heart rate band). */
+  minValue?: number | null;
+  maxValue?: number | null;
   recordedAt?: string;
   date?: string; // "YYYY-MM-DD" format, displayed as-is without timezone conversion
   trend: 'up' | 'down' | 'flat' | null;
@@ -156,6 +159,8 @@ export default function MetricCard({
   unit,
   formattedValue,
   displayUnit,
+  minValue,
+  maxValue,
   recordedAt,
   date,
   trend,
@@ -215,6 +220,15 @@ export default function MetricCard({
         </span>
         {showUnit && <span className="text-sm text-gray-500">{showUnit}</span>}
       </div>
+
+      {/* Day's min–max band (avg_minmax metrics: the value above is the average) */}
+      {minValue != null && maxValue != null && minValue !== maxValue && (
+        <div className="pl-2 mb-1">
+          <span className="text-xs text-gray-500">
+            {formatMetricValue(minValue)}–{formatMetricValue(maxValue)} range
+          </span>
+        </div>
+      )}
 
       {/* Range */}
       {rangeText && (

@@ -37,6 +37,7 @@ const adminNavigation = [
   { name: 'Schedule', href: '/admin/schedule', icon: Database },
   { name: 'Sync Config', href: '/admin/sync-config', icon: Activity },
   { name: 'Metric Definitions', href: '/admin/metric-definitions', icon: TestTube2 },
+  { name: 'System Settings', href: '/admin/system-settings', icon: Settings },
 ];
 
 export default function Sidebar() {

@@ -103,9 +103,9 @@ async def _process_notification(data: dict):
         end += timedelta(hours=1)
 
     try:
-        saved = await sync_health_data(user_id, start, end, data_types=[internal_type])
-        if saved:
-            logger.info(f"Webhook: saved {saved} {internal_type} record(s) for user {user_id}")
+        outcome = await sync_health_data(user_id, start, end, data_types=[internal_type])
+        if outcome.saved:
+            logger.info(f"Webhook: saved {outcome.saved} {internal_type} record(s) for user {user_id}")
     except Exception as e:
         logger.warning(f"Webhook: failed to sync {internal_type} for user {user_id}: {e}")
 

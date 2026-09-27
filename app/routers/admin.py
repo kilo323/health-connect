@@ -447,18 +447,22 @@ async def debug_sync_task(
 async def get_compaction_settings(
     current_user: UserResponse = Depends(get_current_user),
 ):
-    """Return the raw-data retention window (admin only)."""
+    """Return the raw/hourly retention windows (admin only)."""
     if current_user.role != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
 
     from ..services.compaction import (
-        DEFAULT_RAW_RETENTION_DAYS, RAW_RETENTION_DESCRIPTION, get_raw_retention_days,
+        DEFAULT_HOURLY_RETENTION_DAYS, DEFAULT_RAW_RETENTION_DAYS,
+        RAW_RETENTION_DESCRIPTION, get_hourly_retention_days, get_raw_retention_days,
     )
 
     days = await get_raw_retention_days()
+    hourly_days = await get_hourly_retention_days()
     return {
         "raw_retention_days": days,
         "default_raw_retention_days": DEFAULT_RAW_RETENTION_DAYS,
+        "hourly_retention_days": hourly_days,
+        "default_hourly_retention_days": DEFAULT_HOURLY_RETENTION_DAYS,
         "description": RAW_RETENTION_DESCRIPTION,
     }
 
@@ -468,29 +472,42 @@ async def update_compaction_settings(
     payload: dict,
     current_user: UserResponse = Depends(get_current_user),
 ):
-    """Set how many days of non-rolled-up data to keep (admin only).
+    """Set the raw/hourly retention windows (admin only).
 
-    Older raw samples are compacted into a daily rollup and then deleted. Only
-    metrics with rollup enabled are touched. 0 keeps raw data forever.
+    Raw samples older than ``raw_retention_days`` are compacted into daily rows
+    and then deleted. Hourly rows (the intraday tier) live for
+    ``hourly_retention_days``; 0 keeps them forever. Daily rows are never
+    pruned. Only rollup-enabled metrics lose raw rows.
     """
     if current_user.role != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
 
     if "raw_retention_days" not in payload:
         raise HTTPException(status_code=400, detail="raw_retention_days is required")
-    try:
-        days = int(payload["raw_retention_days"])
-    except (TypeError, ValueError):
-        raise HTTPException(status_code=400, detail="raw_retention_days must be an integer")
-    if days < 0:
-        raise HTTPException(status_code=400, detail="raw_retention_days cannot be negative")
-    if days > 3650:
-        raise HTTPException(status_code=400, detail="raw_retention_days cannot exceed 3650")
 
-    from ..services.compaction import set_raw_retention_days
+    def _parse(field: str) -> int:
+        try:
+            days = int(payload[field])
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail=f"{field} must be an integer")
+        if days < 0:
+            raise HTTPException(status_code=400, detail=f"{field} cannot be negative")
+        if days > 3650:
+            raise HTTPException(status_code=400, detail=f"{field} cannot exceed 3650")
+        return days
 
-    saved = await set_raw_retention_days(days)
-    return {"raw_retention_days": saved}
+    raw_days = _parse("raw_retention_days")
+
+    from ..services.compaction import set_hourly_retention_days, set_raw_retention_days
+
+    saved_raw = await set_raw_retention_days(raw_days)
+    saved_hourly = None
+    if "hourly_retention_days" in payload:
+        saved_hourly = await set_hourly_retention_days(_parse("hourly_retention_days"))
+    return {
+        "raw_retention_days": saved_raw,
+        "hourly_retention_days": saved_hourly,
+    }
 
 
 @router.post("/sync/compact")
@@ -1459,6 +1476,8 @@ async def create_metric_definition(
         aliases=_json.dumps(data.aliases or []),
         reference_ranges=_json.dumps([r.model_dump() for r in (data.reference_ranges or [])]),
         unit_conversions=_json.dumps(data.unit_conversions or {}),
+        aggregation=data.aggregation,
+        cadence=data.cadence,
     )
     db.add(definition)
     await db.commit()
@@ -1509,6 +1528,12 @@ async def update_metric_definition(
     definition.aliases = _json.dumps(data.aliases or [])
     definition.reference_ranges = _json.dumps([r.model_dump() for r in (data.reference_ranges or [])])
     definition.unit_conversions = _json.dumps(data.unit_conversions or {})
+    # Only touch the cadence fields when the client actually sent them, so a
+    # partial update can't silently reset an aggregation override to default.
+    if "aggregation" in data.model_fields_set:
+        definition.aggregation = data.aggregation
+    if "cadence" in data.model_fields_set:
+        definition.cadence = data.cadence
 
     await db.commit()
     await db.refresh(definition)

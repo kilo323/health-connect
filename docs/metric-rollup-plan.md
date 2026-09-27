@@ -235,8 +235,13 @@ not synced via list today).
      `(metric_label, value, recorded_at)`; `_extract_daily_rollup_rows` handles the
      verified rollup fields (steps/distance/calories sum, weight/body_fat avg,
      heart_rate avg/min/max, move_minutes summed by level).
-   - `_aggregate_daily` implements heart_rate A2 for raw windows (group samples by
-     day → avg/min/max at UTC midnight).
+   - ~~`_aggregate_daily` implements heart_rate A2 for raw windows (group samples by
+     day → avg/min/max at UTC midnight).~~ **Removed 2026-09-26**: raw heart-rate
+     samples are now stored individually (`granularity='raw'`) instead of being
+     collapsed to 3 daily rows. Older days still come from `fetch_daily_rollup`
+     (avg/min/max), so daily history is unchanged — see
+     `docs/google-sync-backfill.md` for why raw heart rate over a 30-day window
+     was unusable.
    - `sync_health_data(..., settings_data=)`; `_run_sync` passes the loaded settings.
    - **Verified live**: 14-day sync → steps/distance 1 row/day (Jul 31–Aug 6) + raw
      (Aug 7–14); heart_rate 3 rows/day across all 15 days.

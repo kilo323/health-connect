@@ -1,4 +1,7 @@
-from sqlalchemy import String, Text, DateTime, Boolean, Float, Enum as SAEnum, ForeignKey
+from sqlalchemy import (
+    String, Text, DateTime, Boolean, Float, Enum as SAEnum, ForeignKey,
+    Index, UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from datetime import datetime, timezone
 import enum
@@ -42,6 +45,45 @@ class HealthMetric(Base):
     definition = relationship("MetricDefinition")
 
 
+class MetricHourly(Base):
+    """Hourly aggregates derived from raw samples (the middle storage tier).
+
+    Tiering: raw samples (seconds/minutes) are compacted into one row per
+    (metric, hour) here, and into a `daily` row of `health_metrics` as they age
+    further. Unlike a daily row, an hourly row never supersedes raw samples of
+    the same metric, so intraday detail survives until raw retention expires.
+
+    Rows are derived (written by app/services/compaction.py), idempotent by
+    (user_id, metric_type, recorded_at, source), and kept far longer than raw
+    data because 24 rows/metric/day is negligible next to ~35k raw heart-rate
+    samples/day.
+    """
+
+    __tablename__ = "metric_hourly"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    metric_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    value: Mapped[float] = mapped_column(Float, nullable=False)
+    unit: Mapped[str] = mapped_column(String(50))
+    recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)  # hour-aligned, UTC
+    source: Mapped[str] = mapped_column(String(100), default="google_health_connect")
+    definition_id: Mapped[int | None] = mapped_column(ForeignKey("metric_definitions.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+    definition = relationship("MetricDefinition")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "metric_type", "recorded_at", "source",
+            name="uq_metric_hourly_point",
+        ),
+        Index("ix_metric_hourly_lookup", "user_id", "metric_type", "recorded_at"),
+    )
+
+
 class SyncConfig(Base):
     __tablename__ = "sync_configs"
 
@@ -69,6 +111,12 @@ class MetricDefinition(Base):
     aliases: Mapped[str | None] = mapped_column(Text)  # JSON array of alternate names e.g. ["Creatinine, Serum", "Crea"]
     reference_ranges: Mapped[str | None] = mapped_column(Text)  # JSON array of range objects
     unit_conversions: Mapped[str | None] = mapped_column(Text)  # JSON map e.g. {"µmol/L": 88.42}
+    # How this metric collapses over time (see app/services/metric_registry.py):
+    # aggregation: "sum" | "avg" | "avg_minmax" | "latest"
+    # cadence:     "intraday" | "daily" | "event"
+    # NULL means "use the registry default", so existing rows keep working.
+    aggregation: Mapped[str | None] = mapped_column(String(20))
+    cadence: Mapped[str | None] = mapped_column(String(20))
 
 
 class Document(Base):

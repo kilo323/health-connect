@@ -67,6 +67,9 @@ class MetricDefinitionCreate(BaseModel):
     aliases: Optional[List[str]] = []
     reference_ranges: Optional[List[ReferenceRange]] = []
     unit_conversions: Optional[dict] = {}  # {"unit_name": multiplier_to_canonical}
+    # How the metric collapses over time; None = registry default.
+    aggregation: Optional[str] = None  # sum | avg | avg_minmax | latest
+    cadence: Optional[str] = None      # intraday | daily | event
 
 
 class MetricDefinitionResponse(BaseModel):
@@ -79,6 +82,8 @@ class MetricDefinitionResponse(BaseModel):
     aliases: Optional[List[str]] = []
     reference_ranges: Optional[List[ReferenceRange]] = []
     unit_conversions: Optional[dict] = {}
+    aggregation: Optional[str] = None
+    cadence: Optional[str] = None
 
     class Config:
         from_attributes = True

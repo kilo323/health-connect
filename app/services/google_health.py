@@ -323,14 +323,33 @@ class GoogleHealthService:
         # 14-day types vs 90-day types (per Google Health API limits).
         max_window_days = 14 if api_type in ("total-calories", "heart-rate", "active-minutes") else 90
 
+        if end_time <= start_time:
+            return []
+
         refreshed = False
         rollups: list[Dict[str, Any]] = []
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             # Walk the full window forward in API-sized chunks.
-            chunk_start = start_time
-            while chunk_start < end_time:
-                chunk_end = min(chunk_start + timedelta(days=max_window_days), end_time)
+            #
+            # The API takes a CIVIL date range and requires range.end > range.start
+            # ("Civil time interval end time must be strictly greater than start
+            # time"), so chunking on raw timedelta boundaries breaks whenever a
+            # window does not span two distinct calendar days: start.date collapses
+            # onto end.date and the whole rollup fails with INVALID_ARGUMENT. Chunk
+            # on whole civil days instead — each request then spans 1..max_window_days
+            # days and starts at midnight (aligned with windowSizeDays=1).
+            first_day = start_time.date()
+            last_day = end_time.date()  # exclusive, as before
+            if last_day <= first_day:
+                # Sub-day window (e.g. a rollup window that ends exactly at the
+                # recent-data cutoff). Roll up the single civil day containing it
+                # rather than skipping it, so that day's data is not left unsynced.
+                last_day = first_day + timedelta(days=1)
+
+            chunk_start = first_day
+            while chunk_start < last_day:
+                chunk_end = min(chunk_start + timedelta(days=max_window_days), last_day)
                 body = {
                     "range": {
                         "start": {"date": {"year": chunk_start.year, "month": chunk_start.month, "day": chunk_start.day}},

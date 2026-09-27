@@ -17,8 +17,10 @@ async def main():
     start = end - timedelta(days=14)
     print(f"sync window: {start} -> {end}  (cutoff=7d -> rollup [start..cutoff], raw [cutoff..end])")
     # Empty settings_data -> DEFAULT_ROLLUP_CONFIG (steps/distance/calories/heart_rate/move_minutes enabled, 7d cutoff)
-    saved = await sync_health_data(1, start, end, settings_data={})
-    print(f"\nTOTAL saved: {saved}")
+    outcome = await sync_health_data(1, start, end, settings_data={})
+    print(f"\nTOTAL saved: {outcome.saved}")
+    if outcome.failed_from is not None:
+        print(f"FAILED window from: {outcome.failed_from} (scheduler will rewind the cursor here)")
 
 
 if __name__ == "__main__":

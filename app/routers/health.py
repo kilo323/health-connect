@@ -1,17 +1,17 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, status, UploadFile, File
 from fastapi.responses import RedirectResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, func, text
 import os
 import uuid
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import List
 
 from ..database import get_db, async_session_factory
 from ..models.user import User
-from ..models.health_data import Document, PendingAnalysis, PendingMetric, MetricDefinition, HealthMetric, BatchJob, DocumentStatus
+from ..models.health_data import Document, PendingAnalysis, PendingMetric, MetricDefinition, HealthMetric, MetricHourly, BatchJob, DocumentStatus
 from ..models.settings import AppSettings
 from ..schemas.health_data import (
     HealthMetricCreate, HealthMetricResponse,
@@ -26,21 +26,25 @@ from ..services.google_health import GoogleHealthService
 from ..services.nextcloud import NextcloudService
 from ..services.llm import LLMService
 from ..services.encryption import encryption_service
+from ..services import metric_registry
 
 router = APIRouter(prefix="/health", tags=["Health Data"])
 logger = logging.getLogger(__name__)
 
 
-# Metrics that accumulate over the day: within the rollup cutoff window they
-# sync as many small raw interval rows, so same-day rows must be SUMMED into a
-# single daily total. Everything else (weight, heart rate, labs, ...) is a
-# snapshot where the latest sample per day is the representative value.
-_SUMMABLE_METRIC_KEYWORDS = ("steps", "distance", "calories", "minutes", "sleep")
+def _parse_dt(value) -> datetime | None:
+    """Normalise a raw-SQL datetime (text() returns strings) to a datetime."""
+    if value is None or isinstance(value, datetime):
+        return value
+    try:
+        return datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
 
 
-def _is_summable_metric(metric_type: str) -> bool:
-    t = (metric_type or "").lower()
-    return any(k in t for k in _SUMMABLE_METRIC_KEYWORDS)
+def _hour_key(hr: str) -> str:
+    """SQL's hour label is 'YYYY-MM-DD HH:00:00'; API points use ISO 'T'."""
+    return hr.replace(" ", "T") if isinstance(hr, str) and " " in hr else hr
 
 
 async def _daily_metric_values(
@@ -50,61 +54,307 @@ async def _daily_metric_values(
     start_date: datetime | None = None,
     year: int | None = None,
 ) -> list[dict]:
-    """Compute one representative value per (metric_type, calendar day).
+    """One representative value per (metric_type, calendar day), computed in SQL.
 
-    Aggregation rules:
-    - If a day has a `daily` rollup row, that value is authoritative for the day
-      (same-day granular rows are ignored — they were superseded at ingest).
-    - Otherwise, summable metrics (steps, distance, calories, minutes, sleep)
-      SUM all same-day granular rows into a daily total, while snapshot metrics
-      (weight, heart rate, labs, ...) keep the latest sample of the day.
+    Aggregation and tier precedence per day (see app/services/metric_registry.py
+    for the aggregation/cadence definitions):
 
-    Returns dicts sorted by recorded_at (newest first):
-      {"metric_type", "day", "value", "recorded_at", "row"} where `row` is the
-      representative HealthMetric carrying unit/source metadata.
+    1. A ``daily`` rollup row is authoritative for the day (Google rollup or a
+       compaction-written aggregate).
+    2. Otherwise raw samples are aggregated with the metric's ``aggregation``:
+       ``sum`` (steps, distance, minutes), ``avg`` / ``avg_minmax`` (heart rate
+       — with min/max for the band), or ``latest`` (weight, labs, snapshots).
+    3. Otherwise hourly rows from ``metric_hourly`` (raw already compacted away,
+       no daily row written yet).
+    4. ``avg_minmax`` parents additionally merge their companion series
+       (Heart Rate (Average)/(Minimum)/(Maximum)) — filling min/max where the
+       parent only has a daily average, and supplying days the parent has no
+       rows for at all (raw heart-rate history starts long after its rollup).
+
+    Previously this loaded every row into Python (~250k today, +35k/day for
+    heart rate) on every dashboard load; it is now two grouped queries.
+
+    Returns newest-first dicts:
+      {"metric_type", "day", "value", "min_value", "max_value", "n", "tier",
+       "recorded_at", "unit", "source", "id", "user_id", "created_at",
+       "source_document", "definition_id", "reference_range",
+       "aggregation", "cadence"}
     """
-    filters = [HealthMetric.user_id == user_id]
+    registry = await metric_registry.load_registry(db)
+
+    where = ["user_id = :uid"]
+    params: dict = {"uid": user_id}
     if metric_type:
-        filters.append(HealthMetric.metric_type == metric_type)
+        where.append("metric_type = :mt")
+        params["mt"] = metric_type
     if start_date is not None:
-        filters.append(HealthMetric.recorded_at >= start_date)
+        where.append("recorded_at >= :sd")
+        params["sd"] = _as_naive_utc(start_date) if start_date.tzinfo else start_date
+    if year is not None:
+        where.append("strftime('%Y', recorded_at) = :yr")
+        params["yr"] = str(year)
+    where_sql = " AND ".join(where)
 
-    result = await db.execute(
-        select(HealthMetric).where(*filters).order_by(HealthMetric.recorded_at.asc())
-    )
-    rows = result.scalars().all()
-
-    groups: dict[tuple[str, str], list[HealthMetric]] = {}
-    for m in rows:
-        if not m.recorded_at:
-            continue
-        if year is not None and m.recorded_at.year != year:
-            continue
-        day = m.recorded_at.strftime("%Y-%m-%d")
-        groups.setdefault((m.metric_type, day), []).append(m)
+    # One pass for the aggregates, one for the representative row of each day
+    # (unit/source/metadata): the daily row if there is one, else the latest raw.
+    sql = text(f"""
+        WITH agg AS (
+            SELECT metric_type, date(recorded_at) AS day,
+                   SUM(CASE WHEN granularity = 'daily' THEN 1 ELSE 0 END) AS daily_n,
+                   MAX(CASE WHEN granularity = 'daily' THEN value END) AS daily_value,
+                   SUM(CASE WHEN granularity <> 'daily' THEN value END) AS raw_sum,
+                   AVG(CASE WHEN granularity <> 'daily' THEN value END) AS raw_avg,
+                   MIN(CASE WHEN granularity <> 'daily' THEN value END) AS raw_min,
+                   MAX(CASE WHEN granularity <> 'daily' THEN value END) AS raw_max,
+                   SUM(CASE WHEN granularity <> 'daily' THEN 1 ELSE 0 END) AS raw_n,
+                   COUNT(*) AS n
+            FROM health_metrics
+            WHERE {where_sql}
+            GROUP BY metric_type, date(recorded_at)
+        ),
+        rep AS (
+            SELECT metric_type, date(recorded_at) AS day, id, user_id, value,
+                   unit, source, recorded_at, created_at, source_document,
+                   definition_id, reference_range,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY metric_type, date(recorded_at)
+                       ORDER BY CASE WHEN granularity = 'daily' THEN 0 ELSE 1 END,
+                                recorded_at DESC, id DESC
+                   ) AS rn
+            FROM health_metrics
+            WHERE {where_sql}
+        )
+        SELECT a.metric_type, a.day, a.daily_n, a.daily_value,
+               a.raw_sum, a.raw_avg, a.raw_min, a.raw_max, a.raw_n, a.n,
+               r.id, r.user_id, r.value AS rep_value, r.unit, r.source,
+               r.recorded_at, r.created_at, r.source_document, r.definition_id,
+               r.reference_range
+        FROM agg a
+        JOIN rep r ON r.metric_type = a.metric_type AND r.day = a.day AND r.rn = 1
+        ORDER BY r.recorded_at DESC
+    """)
+    rows = (await db.execute(sql, params)).all()
 
     out: list[dict] = []
-    for (mtype, day), ms in groups.items():
-        daily_rows = [m for m in ms if getattr(m, "granularity", "raw") == "daily"]
-        if daily_rows:
-            rep = max(daily_rows, key=lambda m: m.id)
-            value = rep.value
-        elif _is_summable_metric(mtype):
-            rep = max(ms, key=lambda m: (m.recorded_at, m.id))
-            value = float(sum(m.value for m in ms))
-        else:
-            rep = max(ms, key=lambda m: (m.recorded_at, m.id))
-            value = rep.value
-        out.append({
-            "metric_type": mtype,
-            "day": day,
-            "value": value,
-            "recorded_at": rep.recorded_at,
-            "row": rep,
-        })
+    by_key: dict[tuple[str, str], dict] = {}
+    for r in rows:
+        entry = _daily_entry_from_row(r, registry)
+        out.append(entry)
+        by_key[(entry["metric_type"].lower(), entry["day"])] = entry
 
-    out.sort(key=lambda r: r["recorded_at"], reverse=True)
+    # Tier 3: hourly rows for days health_metrics no longer covers.
+    hourly_sql = text(f"""
+        WITH agg AS (
+            SELECT metric_type, date(recorded_at) AS day,
+                   SUM(value) AS total, AVG(value) AS mean,
+                   MIN(value) AS lo, MAX(value) AS hi, COUNT(*) AS n
+            FROM metric_hourly
+            WHERE {where_sql}
+            GROUP BY metric_type, date(recorded_at)
+        ),
+        rep AS (
+            SELECT metric_type, date(recorded_at) AS day, id, user_id, value,
+                   unit, source, recorded_at, created_at, definition_id,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY metric_type, date(recorded_at)
+                       ORDER BY recorded_at DESC, id DESC
+                   ) AS rn
+            FROM metric_hourly
+            WHERE {where_sql}
+        )
+        SELECT a.metric_type, a.day, a.total, a.mean, a.lo, a.hi, a.n,
+               r.id, r.user_id, r.value AS rep_value, r.unit, r.source,
+               r.recorded_at, r.created_at, r.definition_id
+        FROM agg a
+        JOIN rep r ON r.metric_type = a.metric_type AND r.day = a.day AND r.rn = 1
+        ORDER BY r.recorded_at DESC
+    """)
+    for r in (await db.execute(hourly_sql, params)).all():
+        key = (r.metric_type.lower(), r.day)
+        if key in by_key:
+            continue  # a daily/raw row for that day wins
+        meta = metric_registry.lookup(registry, r.metric_type)
+        agg = meta["aggregation"]
+        if agg == "sum":
+            value = float(r.total or 0)
+        elif agg in ("avg", "avg_minmax"):
+            value = float(r.mean) if r.mean is not None else None
+        else:
+            value = float(r.rep_value)
+        if value is None:
+            continue
+        entry = {
+            "metric_type": r.metric_type, "day": r.day, "value": value,
+            "min_value": float(r.lo) if r.lo is not None else value,
+            "max_value": float(r.hi) if r.hi is not None else value,
+            "n": int(r.n), "tier": "hourly",
+            "recorded_at": _parse_dt(r.recorded_at), "unit": r.unit,
+            "source": r.source,
+            "id": r.id, "user_id": r.user_id,
+            "created_at": _parse_dt(r.created_at),
+            "source_document": None, "definition_id": r.definition_id,
+            "reference_range": None,
+            "aggregation": meta["aggregation"], "cadence": meta["cadence"],
+        }
+        out.append(entry)
+        by_key[key] = entry
+
+    # Tier 4: companion series for avg_minmax parents (Heart Rate).
+    # Discovered from the registry too, so a window where only rollup history
+    # exists (no raw parent rows) still folds into one parent series.
+    if metric_type:
+        parents = (
+            {metric_type}
+            if metric_registry.lookup(registry, metric_type)["aggregation"] == "avg_minmax"
+            else set()
+        )
+    else:
+        parents = {
+            e["name"] for e in registry.values() if e["aggregation"] == "avg_minmax"
+        } | {e["metric_type"] for e in out if e["aggregation"] == "avg_minmax"}
+    for parent in parents:
+        comp = metric_registry.companions_for(parent)
+        if not comp:
+            continue
+        await _merge_companions(db, registry, out, by_key, parent, comp, params)
+
+    out.sort(key=lambda e: e["recorded_at"] or datetime.min, reverse=True)
     return out
+
+
+def _daily_entry_from_row(r, registry: dict) -> dict:
+    """Build the per-day entry from the aggregated SQL row."""
+    meta = metric_registry.lookup(registry, r.metric_type)
+    agg = meta["aggregation"]
+    raw_n = int(r.raw_n or 0)
+    daily_n = int(r.daily_n or 0)
+
+    if daily_n > 0:
+        value = float(r.daily_value)
+        tier = "daily"
+        min_v = max_v = value
+    elif raw_n == 0:
+        value = float(r.rep_value)
+        tier = "raw"
+        min_v = max_v = value
+    elif agg == "sum":
+        value = float(r.raw_sum or 0)
+        tier = "raw"
+        min_v = float(r.raw_min)
+        max_v = float(r.raw_max)
+    elif agg in ("avg", "avg_minmax"):
+        value = float(r.raw_avg)
+        tier = "raw"
+        min_v = float(r.raw_min)
+        max_v = float(r.raw_max)
+    else:  # latest — the representative row is the newest sample of the day
+        value = float(r.rep_value)
+        tier = "raw"
+        min_v = float(r.raw_min)
+        max_v = float(r.raw_max)
+
+    return {
+        "metric_type": r.metric_type, "day": r.day, "value": value,
+        "min_value": min_v, "max_value": max_v, "n": int(r.n), "tier": tier,
+        "recorded_at": _parse_dt(r.recorded_at), "unit": r.unit,
+        "source": r.source,
+        "id": r.id, "user_id": r.user_id, "created_at": _parse_dt(r.created_at),
+        "source_document": r.source_document, "definition_id": r.definition_id,
+        "reference_range": r.reference_range,
+        "aggregation": agg, "cadence": meta["cadence"],
+    }
+
+
+async def _merge_companions(
+    db: AsyncSession,
+    registry: dict,
+    out: list[dict],
+    by_key: dict[tuple[str, str], dict],
+    parent: str,
+    comp: dict[str, str],
+    params: dict,
+) -> None:
+    """Fold Heart Rate (Average)/(Minimum)/(Maximum) into the parent series.
+
+    Fills min/max on days the parent only has a daily average, and creates
+    parent entries for days the parent has no rows at all (rollup history that
+    predates raw heart-rate samples).
+    """
+    names = [comp[k] for k in ("avg", "min", "max")]
+    placeholders = ", ".join(f":c{i}" for i in range(len(names)))
+    sql = text(f"""
+        WITH agg AS (
+            SELECT metric_type, date(recorded_at) AS day,
+                   MAX(value) AS value, COUNT(*) AS n
+            FROM health_metrics
+            WHERE user_id = :uid
+              AND metric_type IN ({placeholders})
+              AND granularity = 'daily'
+              {"AND recorded_at >= :csd" if params.get("sd") is not None else ""}
+              {"AND strftime('%Y', recorded_at) = :yr" if params.get("yr") is not None else ""}
+            GROUP BY metric_type, date(recorded_at)
+        ),
+        rep AS (
+            SELECT metric_type, date(recorded_at) AS day, id, user_id, unit,
+                   source, recorded_at, created_at,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY metric_type, date(recorded_at)
+                       ORDER BY id DESC
+                   ) AS rn
+            FROM health_metrics
+            WHERE user_id = :uid
+              AND metric_type IN ({placeholders})
+              AND granularity = 'daily'
+              {"AND recorded_at >= :csd" if params.get("sd") is not None else ""}
+              {"AND strftime('%Y', recorded_at) = :yr" if params.get("yr") is not None else ""}
+        )
+        SELECT a.metric_type, a.day, a.value, a.n,
+               r.id, r.user_id, r.unit, r.source, r.recorded_at, r.created_at
+        FROM agg a
+        JOIN rep r ON r.metric_type = a.metric_type AND r.day = a.day AND r.rn = 1
+    """)
+    cparams = {"uid": params["uid"], **{f"c{i}": n for i, n in enumerate(names)}}
+    if params.get("sd") is not None:
+        cparams["csd"] = params["sd"]
+    if params.get("yr") is not None:
+        cparams["yr"] = params["yr"]
+
+    by_kind: dict[str, dict[str, dict]] = {"avg": {}, "min": {}, "max": {}}
+    name_to_kind = {v.lower(): k for k, v in comp.items()}
+    for r in (await db.execute(sql, cparams)).all():
+        kind = name_to_kind.get(r.metric_type.lower())
+        if kind:
+            by_kind[kind][r.day] = r
+
+    parent_key = parent.lower()
+    for day, avg_row in by_kind["avg"].items():
+        min_row = by_kind["min"].get(day)
+        max_row = by_kind["max"].get(day)
+        entry = by_key.get((parent_key, day))
+        if entry is None:
+            # Parent has no rows for this day — the companion avg IS the day.
+            meta = metric_registry.lookup(registry, parent)
+            entry = {
+                "metric_type": parent, "day": day, "value": float(avg_row.value),
+                "min_value": float(min_row.value) if min_row else float(avg_row.value),
+                "max_value": float(max_row.value) if max_row else float(avg_row.value),
+                "n": int(avg_row.n), "tier": "companion",
+                "recorded_at": _parse_dt(avg_row.recorded_at),
+                "unit": avg_row.unit,
+                "source": avg_row.source, "id": avg_row.id,
+                "user_id": avg_row.user_id,
+                "created_at": _parse_dt(avg_row.created_at),
+                "source_document": None, "definition_id": None,
+                "reference_range": None,
+                "aggregation": meta["aggregation"], "cadence": meta["cadence"],
+            }
+            out.append(entry)
+            by_key[(parent_key, day)] = entry
+            continue
+        # Parent row exists: enrich it with the companion band where missing.
+        if entry["min_value"] == entry["max_value"] and min_row and max_row:
+            entry["min_value"] = float(min_row.value)
+            entry["max_value"] = float(max_row.value)
 
 
 def _extract_document_content(document: "Document") -> tuple[str, str | list[str]]:
@@ -206,18 +456,17 @@ async def list_all_metrics(
 
     out: list[HealthMetricResponse] = []
     for d in daily[:limit]:
-        rep = d["row"]
         out.append(
             HealthMetricResponse(
-                id=rep.id,
-                user_id=rep.user_id,
+                id=d["id"],
+                user_id=d["user_id"],
                 metric_type=d["metric_type"],
                 value=d["value"],
-                unit=rep.unit,
-                recorded_at=rep.recorded_at,
-                source=rep.source,
-                source_document=rep.source_document,
-                created_at=rep.created_at
+                unit=d["unit"],
+                recorded_at=d["recorded_at"],
+                source=d["source"],
+                source_document=d["source_document"],
+                created_at=d["created_at"]
             )
         )
     return out
@@ -253,6 +502,105 @@ async def create_health_metric_definition(
     return new_definition
 
 
+@router.get("/metrics/intraday-types")
+async def get_intraday_metric_types(
+    current_user: UserResponse = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Metric types that can be charted at sub-daily resolution.
+
+    Used to populate the intraday chart's metric picker: metrics with raw
+    samples (inside the raw-retention window) plus metrics that only have
+    hourly rows left (older than retention, before their daily rollup). A day
+    with neither is no longer selectable.
+    """
+    raw_rows = (await db.execute(
+        select(HealthMetric.metric_type, HealthMetric.unit,
+               func.count(HealthMetric.id), func.min(HealthMetric.recorded_at),
+               func.max(HealthMetric.recorded_at))
+        .where(
+            HealthMetric.user_id == current_user.id,
+            HealthMetric.granularity == "raw",
+            HealthMetric.source == "google_health_connect",
+        )
+        .group_by(HealthMetric.metric_type)
+    )).all()
+    hourly_rows = (await db.execute(
+        select(MetricHourly.metric_type, MetricHourly.unit,
+               func.count(MetricHourly.id), func.min(MetricHourly.recorded_at),
+               func.max(MetricHourly.recorded_at))
+        .where(MetricHourly.user_id == current_user.id)
+        .group_by(MetricHourly.metric_type)
+    )).all()
+
+    merged: dict[str, dict] = {}
+    for mt, unit, n, first, last in hourly_rows:
+        merged[mt] = {
+            "metric_type": mt, "label": mt.replace("_", " "), "unit": unit or "",
+            "raw_row_count": 0, "hourly_row_count": n,
+            "first_at": first, "last_at": last, "tier": "hourly",
+        }
+    for mt, unit, n, first, last in raw_rows:
+        entry = merged.get(mt)
+        if entry:
+            entry["raw_row_count"] = n
+            entry["tier"] = "raw"
+            entry["first_at"] = min(x for x in (entry["first_at"], first) if x)
+            entry["last_at"] = max(x for x in (entry["last_at"], last) if x)
+        else:
+            merged[mt] = {
+                "metric_type": mt, "label": mt.replace("_", " "), "unit": unit or "",
+                "raw_row_count": n, "hourly_row_count": 0,
+                "first_at": first, "last_at": last, "tier": "raw",
+            }
+
+    # Fold companion series (Heart Rate (Average)/(Minimum)/(Maximum)) into
+    # their parent: the chart merges them anyway, and offering four heart-rate
+    # entries would be noise. If the parent has no rows of its own (raw pruned),
+    # synthesise its picker entry from the companion rows.
+    for parent, parts in metric_registry.COMPANIONS.items():
+        part_names = [parts[k] for k in ("avg", "min", "max")]
+        part_rows = [p for p in (merged.pop(pname, None) for pname in part_names) if p]
+        if not part_rows:
+            continue
+        parent_entry = merged.get(parent)
+        if parent_entry is None:
+            units = {p["unit"] for p in part_rows if p["unit"]}
+            firsts = [p["first_at"] for p in part_rows if p["first_at"]]
+            lasts = [p["last_at"] for p in part_rows if p["last_at"]]
+            merged[parent] = {
+                "metric_type": parent, "label": parent.replace("_", " "),
+                "unit": next(iter(units), ""),
+                "raw_row_count": 0,
+                "hourly_row_count": sum(p["hourly_row_count"] for p in part_rows),
+                "first_at": min(firsts) if firsts else None,
+                "last_at": max(lasts) if lasts else None,
+                "tier": "hourly",
+            }
+        else:
+            parent_entry["hourly_row_count"] += sum(
+                p["hourly_row_count"] for p in part_rows)
+            parent_entry["raw_row_count"] += sum(
+                p["raw_row_count"] for p in part_rows)
+
+    return [
+        {
+            "metric_type": e["metric_type"],
+            "label": e["label"],
+            "unit": e["unit"],
+            "raw_row_count": e["raw_row_count"],
+            "hourly_row_count": e["hourly_row_count"],
+            "tier": e["tier"],
+            "first_at": e["first_at"].isoformat() if e["first_at"] else None,
+            "last_at": e["last_at"].isoformat() if e["last_at"] else None,
+        }
+        for e in sorted(merged.values(), key=lambda e: e["metric_type"])
+    ]
+
+
+# NOTE: keep this route ABOVE "/metrics/{metric_type}" -- FastAPI matches in
+# declaration order, so a literal path defined after a path parameter is
+# unreachable.
 @router.get("/metrics/{metric_type}", response_model=List[HealthMetricResponse])
 async def get_metrics(
     metric_type: str,
@@ -282,6 +630,221 @@ async def get_metrics(
         )
         for m in metrics
     ]
+
+
+def _as_naive_utc(dt: datetime) -> datetime:
+    """Normalise a datetime to naive UTC.
+
+    `health_metrics.recorded_at` is stored by SQLite as a naive 'YYYY-MM-DD
+    HH:MM:SS.ffffff' string (the DATETIME format string carries no offset), so
+    values read back have no tzinfo. Callers may send tz-aware ISO strings
+    (a browser sends `...Z`), and subtracting an aware `start` from a naive
+    `recorded_at` raises TypeError, so everything is converted to naive UTC
+    before any arithmetic.
+    """
+    if dt.tzinfo is not None:
+        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
+@router.get("/metrics/{metric_type}/series")
+async def get_metric_series(
+    metric_type: str,
+    start: datetime | None = None,
+    end: datetime | None = None,
+    max_points: int = 500,
+    downsample: bool = True,
+    current_user: UserResponse = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Return a time series for one metric, downsampled to at most `max_points`.
+
+    The daily endpoints (`/metrics`, `/reports/overview`) collapse each metric to
+    one value per day, so intraday detail is invisible there. Raw samples exist
+    for rollup-enabled metrics (heart rate, active minutes) but a single day of
+    heart rate is ~30k rows, which must not be sent to a browser.
+
+    This endpoint buckets the range into at most `max_points` equal time slices
+    and returns min/max/avg per slice, which is what an intraday chart needs to
+    draw an honest band without shipping every sample. `downsample: false`
+    returns the raw rows instead (capped at `max_points`).
+
+    Tier fallback: the finest tier with rows in the range is used —
+    ``raw`` samples, else ``hourly`` rows (metric_hourly, incl. an avg_minmax
+    metric's companion series), else ``daily`` rows. An intraday chart therefore
+    keeps working for dates beyond raw retention instead of going blank.
+
+    Bucket width is whole seconds so slices align to the requested range.
+    """
+    if max_points < 1:
+        max_points = 1
+    max_points = min(max_points, 5000)
+
+    if start is None or end is None:
+        # Default to the most recent day that has data for this metric, at any
+        # tier (raw-only bounds would go blank once raw rows are compacted).
+        bounds = await db.execute(
+            select(func.min(HealthMetric.recorded_at), func.max(HealthMetric.recorded_at))
+            .where(
+                HealthMetric.user_id == current_user.id,
+                HealthMetric.metric_type == metric_type,
+            )
+        )
+        lo, hi = bounds.one()
+        if lo is None:
+            return {
+                "metric_type": metric_type, "points": [], "downsample": downsample,
+                "raw_row_count": 0, "tier": None,
+                "range_start": None, "range_end": None,
+            }
+        end = end or hi
+        start = start or (end - timedelta(days=1))
+    start = _as_naive_utc(start)
+    end = _as_naive_utc(end)
+    if end <= start:
+        raise HTTPException(status_code=400, detail="end must be after start")
+
+    filters = [
+        HealthMetric.user_id == current_user.id,
+        HealthMetric.metric_type == metric_type,
+        HealthMetric.granularity == "raw",
+        HealthMetric.recorded_at >= start,
+        HealthMetric.recorded_at < end,
+    ]
+
+    total = (await db.execute(
+        select(func.count(HealthMetric.id)).where(*filters))).scalar_one()
+
+    if total == 0:
+        return await _derived_series(
+            db, current_user.id, metric_type, start, end, max_points)
+
+    if not downsample:
+        rows = (await db.execute(
+            select(HealthMetric.recorded_at, HealthMetric.value)
+            .where(*filters).order_by(HealthMetric.recorded_at)
+            .limit(max_points))).all()
+        return {
+            "metric_type": metric_type, "downsample": False, "tier": "raw",
+            "raw_row_count": total,
+            "range_start": start.isoformat(), "range_end": end.isoformat(),
+            "points": [{"t": r[0].isoformat(), "min": r[1], "max": r[1], "avg": r[1]}
+                       for r in rows],
+        }
+
+    span = (end - start).total_seconds()
+    bucket = max(1.0, span / max_points)
+    # Group by the bucket index rather than a formatted timestamp so the maths
+    # happens in Python and works identically on any SQLite build.
+    values = (await db.execute(
+        select(HealthMetric.recorded_at, HealthMetric.value)
+        .where(*filters).order_by(HealthMetric.recorded_at))).all()
+
+    buckets: dict[int, list[float]] = {}
+    for ts, value in values:
+        offset = (ts - start).total_seconds()
+        idx = int(offset // bucket)
+        buckets.setdefault(idx, []).append(float(value))
+
+    points = []
+    for idx in sorted(buckets):
+        vs = buckets[idx]
+        points.append({
+            "t": (start + timedelta(seconds=idx * bucket)).isoformat(),
+            "min": min(vs), "max": max(vs), "avg": sum(vs) / len(vs),
+            "count": len(vs),
+        })
+
+    unit = (await db.execute(
+        select(HealthMetric.unit).where(*filters).limit(1))).scalar_one_or_none()
+    return {
+        "metric_type": metric_type, "downsample": True, "tier": "raw",
+        "raw_row_count": total, "bucket_seconds": bucket, "unit": unit,
+        "range_start": start.isoformat(), "range_end": end.isoformat(),
+        "points": points,
+    }
+
+
+async def _derived_series(
+    db: AsyncSession,
+    user_id: int,
+    metric_type: str,
+    start: datetime,
+    end: datetime,
+    max_points: int,
+) -> dict:
+    """Series for a range with no raw samples: hourly tier, then daily rows.
+
+    Shares shape with the raw response so the intraday chart renders either.
+    """
+    # 1. Hourly tier (also merges Heart Rate companion series).
+    hourly = await _hourly_time_series(
+        db, user_id, start, end, only=metric_type)
+    pts = hourly.get(metric_type) or []
+    if pts:
+        points = [
+            {"t": p["date"], "min": p["min"], "max": p["max"], "avg": p["value"],
+             "count": 1}
+            for p in pts
+        ]
+        if len(points) > max_points:
+            points = _bucket_precomputed(points, start, end, max_points)
+        srcs = {p.get("src") for p in pts}
+        tier = ("raw" if "raw" in srcs
+                else "hourly" if "hourly" in srcs else "daily")
+        span = (end - start).total_seconds()
+        return {
+            "metric_type": metric_type, "downsample": True, "tier": tier,
+            "raw_row_count": 0,
+            "hourly_row_count": sum(1 for p in pts if p.get("src") == "hourly"),
+            "bucket_seconds": span / max(max_points, 1),
+            "unit": pts[0].get("unit") or None,
+            "range_start": start.isoformat(), "range_end": end.isoformat(),
+            "points": points,
+        }
+
+    # 2. Daily rows (a day's sum/avg, with the companion band for avg_minmax).
+    daily = await _daily_metric_values(
+        db, user_id=user_id, metric_type=metric_type, start_date=start)
+    start_day = start.date().isoformat()
+    end_day = end.date().isoformat()
+    entries = [d for d in daily if start_day <= d["day"] < end_day]
+    points = [
+        {"t": f"{d['day']}T00:00:00", "min": d["min_value"], "max": d["max_value"],
+         "avg": d["value"], "count": d["n"]}
+        for d in entries
+    ]
+    return {
+        "metric_type": metric_type, "downsample": True, "tier": "daily",
+        "raw_row_count": 0, "bucket_seconds": 86400,
+        "unit": (entries[0]["unit"] if entries else None),
+        "range_start": start.isoformat(), "range_end": end.isoformat(),
+        "points": points,
+    }
+
+
+def _bucket_precomputed(
+    points: list[dict], start: datetime, end: datetime, max_points: int,
+) -> list[dict]:
+    """Re-bucket pre-aggregated hourly points down to `max_points` slices."""
+    span = (end - start).total_seconds()
+    bucket = max(1.0, span / max_points)
+    buckets: dict[int, list[dict]] = {}
+    for p in points:
+        ts = datetime.fromisoformat(p["t"])
+        idx = int(max(0.0, (ts - start).total_seconds()) // bucket)
+        buckets.setdefault(idx, []).append(p)
+    out = []
+    for idx in sorted(buckets):
+        group = buckets[idx]
+        out.append({
+            "t": (start + timedelta(seconds=idx * bucket)).isoformat(),
+            "min": min(g["min"] for g in group),
+            "max": max(g["max"] for g in group),
+            "avg": sum(g["avg"] for g in group) / len(group),
+            "count": sum(g.get("count", 1) for g in group),
+        })
+    return out
 
 
 @router.post("/metrics", response_model=HealthMetricResponse, status_code=status.HTTP_201_CREATED)
@@ -484,10 +1047,23 @@ async def disconnect_google_health(
 @router.get("/reports/overview")
 async def get_report_overview(
     days: int = 30,
+    granularity: str = "auto",
     current_user: UserResponse = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    """Get health report overview with latest values, trends, and time series data"""
+    """Health report overview: latest values, trends, and time series.
+
+    ``granularity`` selects the time-series resolution:
+
+    - ``daily``  — one point per calendar day (long ranges; always available).
+    - ``hourly`` — one point per hour for ``cadence=intraday`` metrics, built
+      from raw samples or the hourly tier. Capped at a 31-day window.
+    - ``auto``   — (default) hourly when ``days <= 7``, otherwise daily.
+
+    Summary cards are always daily: a card is a day-over-day artifact.
+    Companion series (Heart Rate (Average)/(Minimum)/(Maximum)) are folded into
+    their parent so Heart Rate shows once, with a min/max band.
+    """
     from datetime import timedelta
 
     try:
@@ -497,15 +1073,34 @@ async def get_report_overview(
         # (to the time series; summary cards always show the latest values).
         start_date = now - timedelta(days=days) if days > 0 else None
 
-        # One representative daily value per metric type (sums granular rows for
-        # accumulative metrics, prefers daily rollups, latest sample otherwise).
-        daily_values = await _daily_metric_values(db, user_id=user_id)
+        if granularity not in ("auto", "daily", "hourly"):
+            raise HTTPException(status_code=400, detail="granularity must be auto, daily, or hourly")
+        if granularity == "auto":
+            granularity = "hourly" if 0 < days <= 7 else "daily"
+
+        # One representative daily value per metric type. Read 14 days before
+        # the window so the 7-day-vs-prior-week trend has data without pulling
+        # all of history on every dashboard load.
+        fetch_start = (start_date - timedelta(days=14)) if start_date else None
+        daily_values = await _daily_metric_values(
+            db, user_id=user_id, start_date=fetch_start)
 
         def _as_utc(dt):
             """Normalize to tz-aware UTC (SQLite rows may be naive)."""
             if dt is None:
                 return None
             return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
+
+        # Hide companion series when their parent series is present: they are
+        # folded into the parent's min/max band below.
+        present = {d["metric_type"].lower() for d in daily_values}
+        daily_values = [
+            d for d in daily_values
+            if not (
+                metric_registry.is_companion(d["metric_type"])
+                and metric_registry.parent_of(d["metric_type"]) in present
+            )
+        ]
 
         # Group by metric type
         by_type: dict[str, list[dict]] = {}
@@ -521,8 +1116,11 @@ async def get_report_overview(
                     {
                         "date": d["day"],
                         "value": d["value"],
-                        "unit": d["row"].unit or "",
-                        "source": d["row"].source or "",
+                        "min": d["min_value"],
+                        "max": d["max_value"],
+                        "unit": d["unit"] or "",
+                        "source": d["source"] or "",
+                        "tier": d["tier"],
                     }
                     for d in ds
                     if d["_ts"] is not None and (start_date is None or d["_ts"] >= start_date)
@@ -555,23 +1153,220 @@ async def get_report_overview(
             summary.append({
                 "metric_type": metric_type,
                 "latest_value": latest["value"],
-                "unit": latest["row"].unit or "",
+                "latest_min": latest["min_value"],
+                "latest_max": latest["max_value"],
+                "unit": latest["unit"] or "",
                 "recorded_at": latest["_ts"].isoformat() if latest["_ts"] else None,
                 "date": latest["day"],
+                "cadence": latest["cadence"],
+                "aggregation": latest["aggregation"],
                 "trend": trend,
                 "trend_pct": trend_pct,
                 "recent_avg": round(recent_avg, 2) if recent_avg else None,
                 "prior_avg": round(prior_avg, 2) if prior_avg else None,
             })
 
+        if granularity == "hourly":
+            # Long ranges would be thousands of points per metric; daily is the
+            # honest resolution there anyway.
+            h_start = start_date if start_date else (now - timedelta(days=7))
+            h_start = max(h_start, now - timedelta(days=31))
+            hourly_series = await _hourly_time_series(db, user_id, h_start, now)
+            # Intraday metrics switch to hourly points; everything else (labs,
+            # weight, ...) keeps its daily points — there is nothing finer.
+            for mtype, pts in time_series.items():
+                if mtype not in hourly_series and pts:
+                    hourly_series[mtype] = pts
+            time_series = hourly_series
+
         return {
             "period_days": days,
+            "granularity": granularity,
             "summary": summary,
             "time_series": time_series,
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Reports overview failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to generate report: {str(e)[:200]}")
+
+
+async def _hourly_time_series(
+    db: AsyncSession,
+    user_id: int,
+    start: datetime,
+    end: datetime,
+    only: str | None = None,
+) -> dict[str, list[dict]]:
+    """Hourly points per intraday metric: raw samples, else the hourly tier.
+
+    avg_minmax parents (Heart Rate) merge their companion series so the band
+    survives after raw retention expires. `only` narrows the result to a single
+    metric (used by the series endpoint). Returns points as
+    {"date": "YYYY-MM-DDTHH:00:00", value, min, max, unit, source}.
+    """
+    registry = await metric_registry.load_registry(db)
+    seen: dict[str, dict] = {}
+    for entry in registry.values():
+        seen[entry["name"]] = entry
+    if only:
+        # Exact definition name only: series queries use canonical names.
+        entry = seen.get(only)
+        intraday = (
+            {only: entry}
+            if entry and entry["cadence"] == "intraday"
+            else {}
+        )
+    else:
+        # Companions are folded into their parent below, never charted alone.
+        intraday = {
+            n: e for n, e in seen.items()
+            if e["cadence"] == "intraday" and not metric_registry.is_companion(n)
+        }
+    if not intraday:
+        return {}
+
+    start_n = _as_naive_utc(start)
+    end_n = _as_naive_utc(end)
+    hour_expr = "substr(recorded_at, 1, 13) || ':00:00'"
+
+    def _agg_sql(table: str, extra: str = "") -> str:
+        return f"""
+            SELECT metric_type, {hour_expr} AS hr,
+                   SUM(value) AS total, AVG(value) AS mean,
+                   MIN(value) AS lo, MAX(value) AS hi, COUNT(*) AS n
+            FROM {table}
+            WHERE user_id = :uid AND recorded_at >= :start AND recorded_at < :end
+                  {extra}
+            GROUP BY metric_type, {hour_expr}
+        """
+
+    # One representative row per (metric, hour) for unit/source metadata.
+    def _rep_sql(table: str, extra: str = "") -> str:
+        return f"""
+            SELECT metric_type, hr, unit, source FROM (
+                SELECT metric_type, {hour_expr} AS hr, unit, source,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY metric_type, {hour_expr}
+                           ORDER BY recorded_at DESC
+                       ) AS rn
+                FROM {table}
+                WHERE user_id = :uid AND recorded_at >= :start AND recorded_at < :end
+                      {extra}
+            ) WHERE rn = 1
+        """
+
+    params = {"uid": user_id, "start": start_n, "end": end_n}
+    names = list(intraday.keys())
+    name_filter = ""
+    if names:
+        placeholders = ", ".join(f":n{i}" for i in range(len(names)))
+        name_filter = f"AND metric_type IN ({placeholders})"
+        params.update({f"n{i}": n for i, n in enumerate(names)})
+
+    points: dict[tuple[str, str], dict] = {}
+    rep_rows: dict[tuple[str, str], dict] = {}
+
+    async def _collect(table: str, prefer: bool) -> None:
+        # Only raw samples live in health_metrics for this tier; daily rows at
+        # midnight would otherwise double-count into the 00:00 bucket.
+        extra = name_filter
+        if table == "health_metrics":
+            extra = f"{name_filter} AND granularity = 'raw'"
+        for r in (await db.execute(text(_agg_sql(table, extra)), params)).all():
+            key = (r.metric_type, _hour_key(r.hr))
+            if not prefer and key in points:
+                continue
+            agg = intraday.get(r.metric_type, {}).get("aggregation", "latest")
+            if agg == "sum":
+                value = float(r.total or 0)
+            elif agg in ("avg", "avg_minmax"):
+                value = float(r.mean) if r.mean is not None else None
+            else:
+                value = float(r.hi) if r.hi is not None else None
+            if value is None:
+                continue
+            points[key] = {
+                "date": key[1], "value": value,
+                "min": float(r.lo) if r.lo is not None else value,
+                "max": float(r.hi) if r.hi is not None else value,
+                "n": int(r.n),
+                "src": "raw" if table == "health_metrics" else "hourly",
+            }
+        for r in (await db.execute(text(_rep_sql(table, name_filter)), params)).all():
+            key = (r.metric_type, _hour_key(r.hr))
+            if prefer or key not in rep_rows:
+                rep_rows[key] = r
+
+    await _collect("health_metrics", prefer=True)   # raw samples win when present
+    await _collect("metric_hourly", prefer=False)   # hourly tier fills the rest
+
+    # Companion merge for avg_minmax parents: fills any hour the parent's own
+    # rows do not cover (raw retention, partial windows).
+    for name, meta in intraday.items():
+        if meta["aggregation"] != "avg_minmax":
+            continue
+        comp = metric_registry.companions_for(name)
+        if not comp:
+            continue
+        cnames = [comp[k] for k in ("avg", "min", "max")]
+        cparams = {
+            "uid": user_id, "start": start_n, "end": end_n,
+            **{f"c{i}": n for i, n in enumerate(cnames)},
+        }
+        placeholders = ", ".join(f":c{i}" for i in range(len(cnames)))
+        # Companion hourly tier first, then companion daily rows for gaps.
+        for table in ("metric_hourly", "health_metrics"):
+            gfilter = "AND granularity = 'daily'" if table == "health_metrics" else ""
+            rows = (await db.execute(text(f"""
+                SELECT metric_type, {hour_expr} AS hr,
+                       AVG(value) AS mean, MIN(value) AS lo, MAX(value) AS hi,
+                       COUNT(*) AS n, MAX(unit) AS unit, MAX(source) AS source
+                FROM {table}
+                WHERE user_id = :uid AND recorded_at >= :start AND recorded_at < :end
+                  AND metric_type IN ({placeholders})
+                  {gfilter}
+                GROUP BY metric_type, {hour_expr}
+            """), cparams)).all()
+            if not rows:
+                continue
+            kind_of = {v.lower(): k for k, v in comp.items()}
+            by_hr: dict[str, dict] = {}
+            for r in rows:
+                kind = kind_of.get(r.metric_type.lower())
+                if not kind:
+                    continue
+                slot = by_hr.setdefault(_hour_key(r.hr),
+                                        {"unit": r.unit, "source": r.source})
+                slot[kind] = float(r.mean) if kind == "avg" else float(
+                    r.lo if kind == "min" else r.hi)
+            for hr, slot in by_hr.items():
+                if (name, hr) in points:
+                    continue
+                avg_v = slot.get("avg")
+                if avg_v is None:
+                    continue
+                points[(name, hr)] = {
+                    "date": hr, "value": avg_v,
+                    "min": slot.get("min", avg_v), "max": slot.get("max", avg_v),
+                    "n": 1,
+                    "unit": slot.get("unit"), "source": slot.get("source"),
+                    "src": "hourly" if table == "metric_hourly" else "daily",
+                }
+
+    # Attach unit/source from representative rows.
+    result: dict[str, list[dict]] = {}
+    for (mtype, hr), pt in points.items():
+        if pt.get("unit") is None:
+            rep = rep_rows.get((mtype, hr))
+            pt["unit"] = (rep.unit if rep else None) or ""
+            pt["source"] = (rep.source if rep else None) or ""
+        pt.pop("n", None)
+        result.setdefault(mtype, []).append(pt)
+    for series in result.values():
+        series.sort(key=lambda p: p["date"])
+    return result
 
 
 @router.get("/sync/settings")

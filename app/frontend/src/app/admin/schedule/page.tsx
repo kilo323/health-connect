@@ -20,11 +20,80 @@ export default function AdminSchedulePage() {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  const [backfilling, setBackfilling] = useState(false);
   const [syncMessage, setSyncMessage] = useState('');
+  const [retentionDays, setRetentionDays] = useState(90);
+  const [hourlyRetentionDays, setHourlyRetentionDays] = useState(730);
+  const [savingRetention, setSavingRetention] = useState(false);
+  const [compacting, setCompacting] = useState(false);
+  const [compactionMessage, setCompactionMessage] = useState('');
   const { syncInProgress, setSyncInProgress } = useSyncStore();
+
+  const loadRetention = async () => {
+    try {
+      const res = await apiClient.get('/admin/sync/compaction');
+      setRetentionDays(res.data?.raw_retention_days ?? 90);
+      setHourlyRetentionDays(res.data?.hourly_retention_days ?? 730);
+    } catch (error) {
+      console.error('Failed to load raw retention:', error);
+    }
+  };
+
+  const handleSaveRetention = async () => {
+    setSavingRetention(true);
+    setCompactionMessage('');
+    try {
+      const res = await apiClient.put('/admin/sync/compaction', {
+        raw_retention_days: retentionDays,
+        hourly_retention_days: hourlyRetentionDays,
+      });
+      setRetentionDays(res.data.raw_retention_days);
+      if (res.data.hourly_retention_days != null) {
+        setHourlyRetentionDays(res.data.hourly_retention_days);
+      }
+      setCompactionMessage('Retention windows saved.');
+    } catch (error: any) {
+      setCompactionMessage(
+        error.response?.data?.detail || 'Failed to save retention windows'
+      );
+    } finally {
+      setSavingRetention(false);
+    }
+  };
+
+  const handleCompact = async (dryRun: boolean) => {
+    setCompacting(true);
+    setCompactionMessage('');
+    try {
+      const res = await apiClient.post('/admin/sync/compact', { dry_run: dryRun });
+      const d = res.data || {};
+      const lines = [
+        `${d.dry_run ? 'Would compact' : 'Compacted'}: ${d.days_compacted ?? 0} day group(s)`,
+        `Hourly rows ${d.dry_run ? 'that would be written' : 'written'}: ${d.hourly_rows_written ?? 0}`,
+        `Daily rollup rows: ${d.daily_rows_written ?? 0}`,
+        `Raw rows ${d.dry_run ? 'that would be deleted' : 'deleted'}: ${d.raw_rows_deleted ?? 0}`,
+      ];
+      if (d.hourly_rows_deleted) {
+        lines.push(`Hourly rows pruned: ${d.hourly_rows_deleted}`);
+      }
+      if (d.skipped) lines.push(`Skipped: ${d.skipped}`);
+      if ((d.days_kept_no_daily || []).length) {
+        lines.push(`Kept (no rollup could be written): ${d.days_kept_no_daily.length}`);
+      }
+      if ((d.errors || []).length) {
+        lines.push(`Errors: ${d.errors.length} — ${d.errors[0]}`);
+      }
+      setCompactionMessage(lines.join('\n'));
+    } catch (error: any) {
+      setCompactionMessage(error.response?.data?.detail || 'Failed to run compaction');
+    } finally {
+      setCompacting(false);
+    }
+  };
 
   useEffect(() => {
     loadSettings();
+    loadRetention();
 
     // Poll sync status so the button state stays accurate even if the user
     // leaves this page while a sync is running.
@@ -97,6 +166,21 @@ export default function AdminSchedulePage() {
       setSyncMessage(error.response?.data?.detail || 'Failed to start sync');
     } finally {
       setSyncing(false);
+    }
+  };
+
+  const handleBackfill = async () => {
+    if (syncInProgress) return;
+    setBackfilling(true);
+    setSyncMessage('');
+    try {
+      await apiClient.post('/admin/sync/backfill');
+      setSyncMessage('Backfill started! Re-fetching all user data from the beginning.');
+      setTimeout(() => setSyncMessage(''), 5000);
+    } catch (error: any) {
+      setSyncMessage(error.response?.data?.detail || 'Failed to start backfill');
+    } finally {
+      setBackfilling(false);
     }
   };
 
@@ -257,7 +341,7 @@ export default function AdminSchedulePage() {
             </div>
           )}
 
-          <button
+           <button
             type="button"
             onClick={handleSyncNow}
             disabled={syncInProgress}
@@ -266,6 +350,99 @@ export default function AdminSchedulePage() {
             {syncInProgress ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
             {syncInProgress ? 'Syncing...' : 'Sync Now'}
           </button>
+           <button
+            type="button"
+            onClick={handleBackfill}
+            disabled={syncInProgress || backfilling}
+            className="btn-secondary flex items-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
+          >
+            {backfilling ? <Loader2 className="h-4 w-4 animate-spin" /> : <Database className="h-4 w-4" />}
+            {backfilling ? 'Backfilling...' : 'Backfill All Data'}
+          </button>
+        </div>
+
+        {/* Raw Data Retention Section */}
+        <div className="mt-6 pt-4 border-t border-gray-200">
+          <h3 className="text-sm font-semibold text-gray-700 mb-2">Data Retention &amp; Rollups</h3>
+          <p className="text-xs text-gray-500 mb-3">
+            Intraday samples are compacted in two stages: every closed day is
+            aggregated into <strong>hourly rows</strong> (kept for intraday charts long
+            after raw data is gone), and past the raw window each day is summarised into
+            a <strong>daily rollup</strong> before the raw rows are deleted. Daily rows are
+            never pruned. Days older than the <code className="text-gray-600">Sync Days Back</code>{' '}
+            setting can no longer be re-fetched from Google, so the summary is always
+            written before the raw rows are removed. Set either window to{' '}
+            <strong>0</strong> to keep that tier forever.
+          </p>
+
+          {compactionMessage && (
+            <div className={`rounded-lg p-3 mb-3 text-sm whitespace-pre-line ${
+              compactionMessage.includes('Failed') ? 'bg-red-50 text-red-700' : 'bg-blue-50 text-blue-700'
+            }`}>
+              {compactionMessage}
+            </div>
+          )}
+
+          <form
+            onSubmit={(e) => { e.preventDefault(); handleSaveRetention(); }}
+            className="flex items-end gap-4 flex-wrap mb-3"
+          >
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Keep raw samples for (days)
+              </label>
+              <input
+                type="number"
+                min={0}
+                max={3650}
+                value={retentionDays}
+                onChange={(e) => setRetentionDays(Number(e.target.value))}
+                className="input-field w-32"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Keep hourly rows for (days)
+              </label>
+              <input
+                type="number"
+                min={0}
+                max={3650}
+                value={hourlyRetentionDays}
+                onChange={(e) => setHourlyRetentionDays(Number(e.target.value))}
+                className="input-field w-32"
+              />
+            </div>
+            <button type="submit" disabled={savingRetention} className="btn-secondary flex items-center gap-2">
+              {savingRetention && <Loader2 className="h-4 w-4 animate-spin" />}
+              <Save className="h-4 w-4" /> Save
+            </button>
+          </form>
+
+          <p className="text-xs text-gray-500 mb-3">
+            Compaction runs nightly at 03:17 UTC when the scheduler is enabled. With the
+            scheduler disabled, run it manually:
+          </p>
+          <div className="flex gap-2 flex-wrap">
+            <button
+              type="button"
+              onClick={() => handleCompact(true)}
+              disabled={compacting}
+              className="btn-secondary flex items-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
+            >
+              {compacting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Info className="h-4 w-4" />}
+              Preview Compaction
+            </button>
+            <button
+              type="button"
+              onClick={() => handleCompact(false)}
+              disabled={compacting}
+              className="btn-secondary flex items-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
+            >
+              {compacting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Database className="h-4 w-4" />}
+              Compact Now
+            </button>
+          </div>
         </div>
       </div>
     </AuthLayout>

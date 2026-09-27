@@ -2,7 +2,8 @@
 
 import { useState, useEffect } from 'react';
 import AuthLayout from '@/components/AuthLayout';
-import { Plus, Trash2, Download, Search, Activity, Filter } from 'lucide-react';
+import IntradayChart, { type IntradayOption } from '@/components/IntradayChart';
+import { Plus, Trash2, Search, Activity, Filter } from 'lucide-react';
 import apiClient from '@/lib/api-client';
 import { useUnitConversion } from '@/hooks/useUnitConversion';
 
@@ -29,6 +30,7 @@ export default function HealthDataPage() {
   const [filterYear, setFilterYear] = useState<string>('all');
   const [filterMetricType, setFilterMetricType] = useState<string>('all');
   const [availableTypes, setAvailableTypes] = useState<string[]>([]);
+  const [intradayTypes, setIntradayTypes] = useState<IntradayOption[]>([]);
   const { convert, formatValue: formatMetricDisplay, loaded: unitsLoaded } = useUnitConversion();
 
   // Convert a metric value to the user's preferred display unit
@@ -55,7 +57,20 @@ export default function HealthDataPage() {
 
   useEffect(() => {
     loadMetrics();
+    loadIntradayTypes();
   }, [filterYear]);
+
+  // Metrics that still have raw intraday samples. Empty for users with no
+  // Google sync, in which case the chart is hidden.
+  const loadIntradayTypes = async () => {
+    try {
+      const res = await apiClient.get('/health/metrics/intraday-types');
+      const data = (res.data || []) as IntradayOption[];
+      setIntradayTypes(data);
+    } catch (error) {
+      console.error('Failed to load intraday metric types:', error);
+    }
+  };
 
   const loadMetrics = async () => {
     try {
@@ -103,19 +118,6 @@ export default function HealthDataPage() {
     }
   };
 
-  const handleExport = async () => {
-    try {
-      const res = await apiClient.get('/health/metrics/export', { responseType: 'blob' });
-      const url = window.URL.createObjectURL(new Blob([res.data]));
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `health-metrics-${new Date().toISOString().split('T')[0]}.csv`;
-      a.click();
-    } catch (error) {
-      console.error('Failed to export:', error);
-    }
-  };
-
   const filteredMetrics = metrics.filter(m => {
     const matchesSearch = m.metric_type.toLowerCase().includes(searchQuery.toLowerCase()) ||
       m.unit.toLowerCase().includes(searchQuery.toLowerCase());
@@ -136,9 +138,11 @@ export default function HealthDataPage() {
         </button>
       </div>
 
+      {/* Intraday chart — only for metrics that still have raw samples. */}
+      {intradayTypes.length > 0 && <IntradayChart options={intradayTypes} />}
+
       {/* Filters */}
-      <div className="flex items-center gap-3 mb-6 flex-wrap">
-        <div className="relative flex-1 min-w-[200px]">
+      <div className="flex items-center gap-3 mb-6 flex-wrap">        <div className="relative flex-1 min-w-[200px]">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
           <input
             type="text"
@@ -168,9 +172,6 @@ export default function HealthDataPage() {
             <option key={t} value={t}>{t.replace(/_/g, ' ')}</option>
           ))}
         </select>
-        <button onClick={handleExport} className="btn-secondary flex items-center gap-2">
-          <Download className="h-4 w-4" /> Export CSV
-        </button>
       </div>
 
       {/* Add Metric Modal */}

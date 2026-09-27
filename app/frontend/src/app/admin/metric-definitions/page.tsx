@@ -76,6 +76,7 @@ export default function AdminMetricDefinitionsPage() {
   const [saving, setSaving] = useState(false);
   const [normalizing, setNormalizing] = useState(false);
   const [proposing, setProposing] = useState(false);
+  const [acceptingAll, setAcceptingAll] = useState(false);
   const [proposals, setProposals] = useState<ProposedDefinition[]>([]);
   const [expandedUnmatched, setExpandedUnmatched] = useState<string | null>(null);
   const [expandedProposal, setExpandedProposal] = useState<string | null>(null);
@@ -222,6 +223,44 @@ export default function AdminMetricDefinitionsPage() {
     }
   };
 
+  const handleAcceptAll = async () => {
+    if (proposals.length === 0) return;
+    setAcceptingAll(true);
+    try {
+      const res = await apiClient.post('/admin/metric-definitions/accept-all-proposals', {
+        proposals: proposals.map(p => ({
+          raw_metric_type: p.raw_metric_type,
+          name: p.name,
+          category: p.category,
+          unit: p.unit,
+          data_type: p.data_type,
+          description: p.description,
+          aliases: p.aliases,
+          reference_ranges: p.reference_ranges,
+          unit_conversions: p.unit_conversions,
+          merge_into_definition_id: p.similarity_score >= 0.8 ? p.similar_definition_id : null,
+        })),
+      });
+      const data = res.data;
+      const parts: string[] = [];
+      if (data.created) parts.push(`${data.created} created`);
+      if (data.merged) parts.push(`${data.merged} merged`);
+      if (data.skipped) parts.push(`${data.skipped} skipped`);
+      if (data.errors?.length) parts.push(`${data.errors.length} error(s)`);
+      const summary = parts.length > 0 ? parts.join(', ') : 'no changes';
+      showMessage('success', `Accept all: ${summary}`);
+      if (data.errors?.length) {
+        data.errors.forEach((e: string) => showMessage('error', e));
+      }
+      setProposals([]);
+      await loadData();
+    } catch (err: any) {
+      showMessage('error', err.response?.data?.detail || 'Accept all failed');
+    } finally {
+      setAcceptingAll(false);
+    }
+  };
+
   const handleMapUnmatched = async (metricType: string) => {
     const defId = mapTarget[metricType];
     if (!defId) return;
@@ -296,7 +335,11 @@ export default function AdminMetricDefinitionsPage() {
           Metric Definitions
         </h1>
         <div className="flex items-center gap-3">
-          <button onClick={handlePropose} disabled={proposing || unmatched.length === 0} className="btn-secondary text-sm flex items-center gap-1">
+           <button onClick={handleAcceptAll} disabled={acceptingAll || proposals.length === 0} className="btn-primary text-sm flex items-center gap-1">
+             <CheckCircle className={`h-4 w-4 ${acceptingAll ? 'animate-pulse' : ''}`} />
+             {acceptingAll ? 'Accepting...' : 'Accept All'}
+           </button>
+           <button onClick={handlePropose} disabled={proposing || unmatched.length === 0} className="btn-secondary text-sm flex items-center gap-1">
             <Sparkles className={`h-4 w-4 ${proposing ? 'animate-pulse' : ''}`} />
             {proposing ? 'Generating...' : 'Generate Proposals'}
           </button>
@@ -354,7 +397,7 @@ export default function AdminMetricDefinitionsPage() {
                       <div><span className="text-gray-500">Aliases:</span> {p.aliases.join(', ') || '-'}</div>
                     </div>
                     {p.description && <p className="text-sm text-gray-600 mb-3">{p.description}</p>}
-                    <div className="flex flex-wrap items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2 mt-3 pt-2 border-t border-gray-100">
                       <button
                         onClick={() => handleMergeProposal(p)}
                         className="btn-primary text-xs py-1.5 flex items-center gap-1"
@@ -374,6 +417,16 @@ export default function AdminMetricDefinitionsPage() {
                 )}
               </div>
             ))}
+            <div className="border-t border-gray-200 pt-3 mt-2 flex justify-end">
+              <button
+                onClick={handleAcceptAll}
+                disabled={acceptingAll}
+                className="btn-primary text-sm flex items-center gap-1"
+              >
+                <CheckCircle className={`h-4 w-4 ${acceptingAll ? 'animate-pulse' : ''}`} />
+                {acceptingAll ? 'Accepting...' : 'Accept All Remaining'}
+              </button>
+            </div>
           </div>
         </div>
       )}

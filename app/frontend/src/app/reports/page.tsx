@@ -6,14 +6,22 @@ import { Activity, TrendingUp, TrendingDown, Minus, BarChart3, Loader2 } from 'l
 import apiClient from '@/lib/api-client';
 import { useUnitConversion } from '@/hooks/useUnitConversion';
 import {
-  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area,
+  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
+  AreaChart, Area, ComposedChart,
 } from 'recharts';
 
 interface MetricSummary {
   metric_type: string;
   latest_value: number;
+  /** Day's min/max band (avg_minmax metrics like heart rate). */
+  latest_min?: number;
+  latest_max?: number;
   unit: string;
   recorded_at: string;
+  /** intraday | daily | event — drives chart style. */
+  cadence?: string;
+  /** sum | avg | avg_minmax | latest — how the day's value was collapsed. */
+  aggregation?: string;
   trend: 'up' | 'down' | 'flat' | null;
   trend_pct: number | null;
   recent_avg: number | null;
@@ -21,13 +29,19 @@ interface MetricSummary {
 }
 
 interface TimeSeriesPoint {
+  /** "YYYY-MM-DD" for daily points, "YYYY-MM-DDTHH:00:00" for hourly. */
   date: string;
   value: number;
+  min?: number;
+  max?: number;
   unit: string;
+  source?: string;
+  tier?: string;
 }
 
 interface ReportData {
   period_days: number;
+  granularity?: 'daily' | 'hourly';
   summary: MetricSummary[];
   time_series: Record<string, TimeSeriesPoint[]>;
 }
@@ -103,6 +117,15 @@ function formatUnit(unit: string): string {
   return unit;
 }
 
+/** Parse a point's date label: daily points are date-only, hourly carry a time. */
+function pointDate(v: string): Date {
+  return v.includes('T') ? new Date(v) : new Date(v + 'T00:00:00');
+}
+
+function isHourlyLabel(v: string): boolean {
+  return v.includes('T');
+}
+
 // ── Time Range Filters ───────────────────────────────────────────────────────
 // `days` is sent to /health/reports/overview. A value of 0 means "all time"
 // (the backend omits the date filter).
@@ -137,7 +160,10 @@ export default function ReportsPage() {
   const loadReport = async () => {
     setLoading(true);
     try {
-      const res = await apiClient.get('/health/reports/overview', { params: { days: period } });
+      const res = await apiClient.get('/health/reports/overview', {
+        // auto = hourly resolution for ranges up to 7d, daily beyond
+        params: { days: period, granularity: 'auto' },
+      });
       setData(res.data);
       // Auto-select first metric with time series data
       if (!selectedMetric && res.data?.summary?.length > 0) {
@@ -259,6 +285,14 @@ export default function ReportsPage() {
                         {displayUnit}
                       </span>
                     </div>
+                    {item.aggregation === 'avg_minmax' &&
+                      item.latest_min != null && item.latest_max != null &&
+                      item.latest_min !== item.latest_max && (
+                      <p className="text-xs text-gray-400">
+                        range {formatValue(convert(item.metric_type, item.latest_min, item.unit).value, displayUnit)}–
+                        {formatValue(convert(item.metric_type, item.latest_max, item.unit).value, displayUnit)}
+                      </p>
+                    )}
                     <p className="text-xs text-gray-400 mt-1">
                       {new Date(item.recorded_at).toLocaleDateString()}
                     </p>
@@ -275,12 +309,26 @@ export default function ReportsPage() {
 
           {/* Chart */}
           {selectedMetric && chartData.length > 0 && (() => {
-            // Convert chart data to preferred unit
+            // Convert chart data to preferred unit (incl. the min/max band)
+            const round = (n: number) => Math.round(n * 100) / 100;
             const convertedChartData = chartData.map((p) => {
               const c = convert(selectedMetric, p.value, p.unit);
-              return { ...p, value: Math.round(c.value * 100) / 100, unit: c.unit };
+              return {
+                ...p,
+                value: round(c.value),
+                min: p.min != null ? round(convert(selectedMetric, p.min, p.unit).value) : round(c.value),
+                max: p.max != null ? round(convert(selectedMetric, p.max, p.unit).value) : round(c.value),
+                unit: c.unit,
+              };
             });
             const chartUnit = convertedChartData[0]?.unit || '';
+            const color = METRIC_COLORS[selectedMetric] || '#3b82f6';
+            const summaryItem = summary.find((s) => s.metric_type === selectedMetric);
+            // avg_minmax -> min/max band with an average line; event -> plain
+            // points with no interpolated fill (labs are dated tests, not trends).
+            const band = summaryItem?.aggregation === 'avg_minmax';
+            const event = summaryItem?.cadence === 'event';
+            const hourly = data?.granularity === 'hourly';
 
             return (
             <div className="card">
@@ -290,50 +338,110 @@ export default function ReportsPage() {
                 </h2>
                 <span className="text-sm text-gray-500">
                   {convertedChartData.length} data point{convertedChartData.length !== 1 ? 's' : ''} over {getRangeLabel(period)}
+                  {hourly ? ' (hourly)' : ''}
+                  {band ? ' · avg with min–max band' : ''}
                 </span>
               </div>
               <div className="h-72">
                 <ResponsiveContainer width="100%" height="100%">
-                  <AreaChart data={convertedChartData} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
-                    <defs>
-                      <linearGradient id={`gradient-${selectedMetric}`} x1="0" y1="0" x2="0" y2="1">
-                        <stop
-                          offset="5%"
-                          stopColor={METRIC_COLORS[selectedMetric] || '#3b82f6'}
-                          stopOpacity={0.3}
-                        />
-                        <stop
-                          offset="95%"
-                          stopColor={METRIC_COLORS[selectedMetric] || '#3b82f6'}
-                          stopOpacity={0}
-                        />
-                      </linearGradient>
-                    </defs>
+                  <ComposedChart data={convertedChartData} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
+                    {!band && !event && (
+                      <defs>
+                        <linearGradient id={`gradient-${selectedMetric}`} x1="0" y1="0" x2="0" y2="1">
+                          <stop
+                            offset="5%"
+                            stopColor={color}
+                            stopOpacity={0.3}
+                          />
+                          <stop
+                            offset="95%"
+                            stopColor={color}
+                            stopOpacity={0}
+                          />
+                        </linearGradient>
+                      </defs>
+                    )}
                     <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
                     <XAxis
                       dataKey="date"
                       tick={{ fontSize: 12 }}
-                      tickFormatter={(v) => {
-                        const d = new Date(v + 'T00:00:00');
-                        return `${d.getMonth() + 1}/${d.getDate()}`;
+                      tickFormatter={(v: string) => {
+                        const d = pointDate(v);
+                        return isHourlyLabel(v)
+                          ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                          : `${d.getMonth() + 1}/${d.getDate()}`;
                       }}
                     />
                     <YAxis tick={{ fontSize: 12 }} width={60} />
                     <Tooltip
-                      labelFormatter={(v) => new Date(v + 'T00:00:00').toLocaleDateString()}
+                      labelFormatter={(v) => {
+                        const s = String(v ?? '');
+                        const d = pointDate(s);
+                        return isHourlyLabel(s)
+                          ? d.toLocaleString([], {
+                              month: 'long', day: 'numeric', year: 'numeric',
+                              hour: '2-digit', minute: '2-digit',
+                            })
+                          : d.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+                      }}
                       formatter={(value) => [
                         `${formatValue(Number(value), chartUnit)} ${formatUnit(chartUnit)}`,
                         METRIC_LABELS[selectedMetric] || selectedMetric,
                       ]}
                     />
-                    <Area
-                      type="monotone"
-                      dataKey="value"
-                      stroke={METRIC_COLORS[selectedMetric] || '#3b82f6'}
-                      strokeWidth={2}
-                      fill={`url(#gradient-${selectedMetric})`}
-                    />
-                  </AreaChart>
+                    {band && (
+                      <Area
+                        dataKey="max"
+                        stroke="none"
+                        fill={color}
+                        fillOpacity={0.18}
+                        name="max"
+                        isAnimationActive={false}
+                      />
+                    )}
+                    {band && (
+                      <Area
+                        dataKey="min"
+                        stroke="none"
+                        fill="#ffffff"
+                        fillOpacity={0.95}
+                        name="min"
+                        isAnimationActive={false}
+                      />
+                    )}
+                    {band && (
+                      <Line
+                        type="monotone"
+                        dataKey="value"
+                        stroke={color}
+                        strokeWidth={2}
+                        dot={false}
+                        name="avg"
+                        isAnimationActive={false}
+                      />
+                    )}
+                    {event && (
+                      <Line
+                        type="monotone"
+                        dataKey="value"
+                        stroke={color}
+                        strokeWidth={2}
+                        dot={{ r: 3, fill: color }}
+                        name="value"
+                        isAnimationActive={false}
+                      />
+                    )}
+                    {!band && !event && (
+                      <Area
+                        type="monotone"
+                        dataKey="value"
+                        stroke={color}
+                        strokeWidth={2}
+                        fill={`url(#gradient-${selectedMetric})`}
+                        name="value"
+                      />
+                    )}
+                  </ComposedChart>
                 </ResponsiveContainer>
               </div>
             </div>

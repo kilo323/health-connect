@@ -1,6 +1,6 @@
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
-from sqlalchemy import text
+from sqlalchemy import event, text
 from sqlalchemy.pool import NullPool
 
 from app.config import settings
@@ -15,6 +15,30 @@ engine = create_async_engine(
     poolclass=NullPool,
     connect_args={"timeout": 30},
 )
+
+
+@event.listens_for(engine.sync_engine, "connect")
+def _configure_sqlite(dbapi_connection, connection_record):
+    """Put SQLite in WAL mode with relaxed fsync on every new connection.
+
+    Google sync writes tens of thousands of metric rows per backfill. Under the
+    default rollback journal (journal_mode=delete) every COMMIT rewrites the
+    whole journal and fsyncs with synchronous=FULL, which measured ~6.5 ms per
+    row and made a 30-day backfill take longer than a sync run survives.
+
+    WAL + synchronous=NORMAL keeps commits cheap and lets the API read while a
+    sync writes. Durability is still crash-safe: WAL recovers to the last
+    committed transaction, it just does not fsync on every commit (a power loss
+    can lose the last few commits, which re-syncing from Google repairs).
+    """
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+    finally:
+        cursor.close()
+
+
 async_session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 
@@ -79,13 +103,43 @@ async def init_db():
         #       misclassifying granular midnight intervals written in the same
         #       sync batch (e.g. a "1 step at 00:00" interval row).
         cleanup_statements = [
-            # Keep only the newest row per logical data point
+            # Keep only the newest row per logical data point. This must run before
+            # the unique index is created, since duplicates make that fail.
             text("""
                 DELETE FROM health_metrics
                 WHERE id NOT IN (
                     SELECT MAX(id) FROM health_metrics
                     GROUP BY user_id, metric_type, recorded_at, source
                 )
+            """),
+            # Enforce sync idempotency going forward
+            text("""
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_health_metric_point
+                ON health_metrics (user_id, metric_type, recorded_at, source)
+            """),
+            # Supports the "is there a daily row for this metric on this day?" probe
+            # in the superseded-rows delete below, and the dashboard's per-day
+            # aggregation now that health_metrics also holds raw heart-rate samples.
+            # Created BEFORE that delete so the probe is an index lookup.
+            text("""
+                CREATE INDEX IF NOT EXISTS ix_health_metrics_day_lookup
+                ON health_metrics (user_id, metric_type, granularity, recorded_at)
+            """),
+            # Serves the metric library's "unmatched" queue
+            # (MetricNormalizer.get_unmatched_metrics), which filters on
+            # definition_id IS NULL WITHOUT user_id -- so neither index above
+            # applies. That function issues 1 GROUP BY plus, per unmatched
+            # metric_type, a latest-row query (ORDER BY recorded_at DESC LIMIT 1)
+            # and a distinct-documents query: 27 scans of the whole table for 13
+            # types. Without a usable index every scan walks the heap, and through
+            # a Docker bind mount that made the metric definitions page take ~29 s.
+            # Measured on a 250k-row copy: 1.44s -> 0.10s (14.8x), with all three
+            # patterns becoming index searches. recorded_at sits before
+            # source_document so the latest-row query walks the index in order and
+            # stops after one row.
+            text("""
+                CREATE INDEX IF NOT EXISTS ix_health_metrics_unmatched
+                ON health_metrics (definition_id, metric_type, recorded_at, source_document)
             """),
             # Tag Google daily-rollup rows
             text("""
@@ -135,7 +189,15 @@ async def init_db():
                       )
                 )
             """),
-            # A daily aggregate supersedes that day's granular rows
+            # A daily aggregate supersedes that day's granular rows.
+            #
+            # This correlated probe is only fast because ix_health_metrics_day_lookup
+            # (created above) includes `granularity`, narrowing the inner lookup to
+            # the handful of daily rows for that metric. Without it SQLite used
+            # uq_health_metric_point, searched on (user_id, metric_type) alone —
+            # ~246k rows for heart_rate — and re-filtered by date for every
+            # candidate row. That is O(n^2) and hung app startup for 15+ minutes
+            # once raw heart-rate samples grew health_metrics past 270k rows.
             text("""
                 DELETE FROM health_metrics
                 WHERE granularity = 'raw'
@@ -147,11 +209,6 @@ async def init_db():
                       AND d.granularity = 'daily'
                       AND date(d.recorded_at) = date(health_metrics.recorded_at)
                   )
-            """),
-            # Enforce sync idempotency going forward
-            text("""
-                CREATE UNIQUE INDEX IF NOT EXISTS uq_health_metric_point
-                ON health_metrics (user_id, metric_type, recorded_at, source)
             """),
         ]
         for stmt in cleanup_statements:
@@ -174,6 +231,31 @@ async def init_db():
             await conn.execute(text("ALTER TABLE metric_definitions ADD COLUMN unit_conversions TEXT"))
         except Exception:
             pass  # Column already exists
+        # Add aggregation/cadence columns to metric_definitions: how the metric
+        # collapses to a daily value (sum|avg|avg_minmax|latest) and which view
+        # it belongs in (intraday|daily|event). See app/services/metric_registry.py.
+        for _col in ("aggregation", "cadence"):
+            try:
+                await conn.execute(text(
+                    f"ALTER TABLE metric_definitions ADD COLUMN {_col} VARCHAR(20)"))
+            except Exception:
+                pass  # Column already exists
+        # Seed the new columns for rows that predate them (idempotent: NULLs only).
+        try:
+            from app.services.metric_registry import defaults_for
+
+            _pending = (await conn.execute(text(
+                "SELECT id, name FROM metric_definitions "
+                "WHERE aggregation IS NULL OR cadence IS NULL"))).all()
+            for _mid, _name in _pending:
+                _agg, _cad = defaults_for(_name)
+                await conn.execute(
+                    text("UPDATE metric_definitions SET aggregation = :a, cadence = :c "
+                         "WHERE id = :i"),
+                    {"a": _agg, "c": _cad, "i": _mid},
+                )
+        except Exception:
+            pass  # Never let seeding block startup
         # Create user_unit_preferences table (created by create_all if new, but ensure for existing DBs)
         try:
             await conn.execute(text("""

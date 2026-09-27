@@ -1,9 +1,11 @@
 # local dev
+.kilo/
 uploads/
 data/*
 00-sample-docs/
 certs/
 .dev-pids.json
+app_settings.json
 
 # specific includes
 !data/llm_prompt.md

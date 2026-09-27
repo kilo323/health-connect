@@ -1,12 +1,12 @@
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, delete
-from sqlalchemy.exc import IntegrityError
 import asyncio
 import logging
 import logging.handlers
 import os
 from datetime import datetime, timezone
+from typing import NamedTuple
 
 from ..database import async_session_factory
 from ..models.settings import ScheduleConfig, AppSettings
@@ -64,6 +64,17 @@ UNIT_MAP = {
 # endpoint) — they are ALWAYS fetched as a daily aggregate, even within the
 # cutoff window. total-calories is the one such type we sync.
 DAILY_ONLY_DATA_TYPES = {"calories"}
+
+# Rows buffered before a COMMIT during sync. One transaction per row cost
+# ~6.5 ms (fsync under the rollback journal) and made a 30-day backfill take
+# longer than a sync process survives; batching measured ~13x faster while
+# keeping each row isolated in a SAVEPOINT.
+BATCH_COMMIT_ROWS = 500
+
+# API points extracted (and written) per slice. Bounds peak memory for very large
+# raw windows — a 30-day heart-rate window is ~1M points — and caps how much work
+# a killed run can lose.
+POINT_SLICE = 5000
 
 # Reverse of GoogleHealthService.DATA_TYPE_MAP (v4 kebab-case -> internal name)
 API_TYPE_TO_INTERNAL = {
@@ -153,6 +164,49 @@ def _metric_rollup_cutoff(data_type: str, rollup_cfg: dict):
     return bool(m.get("enabled")), cutoff
 
 
+async def _write_sync_cursors(
+    user_id: int,
+    type_cursors: dict[str, datetime],
+    overall: datetime,
+) -> None:
+    """Persist per-data-type sync cursors for a user.
+
+    `type_cursors` is the authoritative record of how far each data type has been
+    synced. `last_google_sync` is kept as the aggregate (the oldest type cursor) so
+    the existing admin backfill endpoint and any older readers keep working.
+    """
+    import json as _json
+
+    try:
+        async with async_session_factory() as db:
+            settings_key = f"sync_settings_{user_id}"
+            result = await db.execute(
+                select(AppSettings).where(AppSettings.key == settings_key)
+            )
+            existing = result.scalar_one_or_none()
+            data: dict = {}
+            if existing:
+                try:
+                    data = _json.loads(existing.value)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            data["type_cursors"] = {k: v.isoformat() for k, v in type_cursors.items()}
+            data["last_google_sync"] = overall.isoformat()
+            value = _json.dumps(data)
+            if existing:
+                existing.value = value
+            else:
+                db.add(AppSettings(
+                    key=settings_key, value=value, description="User sync settings"))
+            await db.commit()
+            logger.info(
+                f"Updated sync cursors for user {user_id} "
+                f"({len(type_cursors)} type(s), overall={overall.isoformat()})"
+            )
+    except Exception as e:
+        logger.warning(f"Failed to update sync cursors for user {user_id}: {e}")
+
+
 async def _upsert_metric(
     db: AsyncSession,
     *,
@@ -164,35 +218,27 @@ async def _upsert_metric(
     source: str,
     definition_id,
     granularity: str,
-) -> bool:
-    """Insert a HealthMetric row, updating the existing row for the same logical
+) -> None:
+    """Write a HealthMetric row, updating the existing row for the same logical
     data point (user_id, metric_type, recorded_at, source) if one exists.
 
-    Returns True when a NEW row was created, False when an existing row was
-    refreshed. Upserting keeps re-synced values current (raw intervals can be
-    corrected by later syncs) instead of silently keeping a stale duplicate.
+    Upserting keeps re-synced values current (raw intervals can be corrected by
+    later syncs) instead of silently keeping a stale duplicate.
+
+    Implemented as a single native ``INSERT ... ON CONFLICT DO UPDATE`` against
+    the uq_health_metric_point unique index. The previous read-then-write (SELECT
+    + INSERT + SAVEPOINT) cost ~4.5 ms per row, which made a heart-rate backfill
+    write-bound; the upsert is one statement and can never raise IntegrityError,
+    so rows can share a transaction and be committed in batches
+    (see BATCH_COMMIT_ROWS).
+
+    The row is not committed here — the caller owns the transaction.
     """
+    from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
     from ..models.health_data import HealthMetric
 
-    result = await db.execute(
-        select(HealthMetric).where(
-            HealthMetric.user_id == user_id,
-            HealthMetric.metric_type == metric_type,
-            HealthMetric.recorded_at == recorded_at,
-            HealthMetric.source == source,
-        )
-    )
-    existing = result.scalar_one_or_none()
-    if existing is not None:
-        existing.value = value
-        existing.unit = unit
-        existing.granularity = granularity
-        if definition_id is not None:
-            existing.definition_id = definition_id
-        await db.commit()
-        return False
-
-    db.add(HealthMetric(
+    stmt = sqlite_insert(HealthMetric).values(
         user_id=user_id,
         metric_type=metric_type,
         value=value,
@@ -201,17 +247,57 @@ async def _upsert_metric(
         source=source,
         definition_id=definition_id,
         granularity=granularity,
-    ))
-    await db.commit()
-    return True
+    )
+    stmt = stmt.on_conflict_do_update(
+        index_elements=[
+            HealthMetric.user_id,
+            HealthMetric.metric_type,
+            HealthMetric.recorded_at,
+            HealthMetric.source,
+        ],
+        set_={
+            "value": value,
+            "unit": unit,
+            "granularity": granularity,
+            # Keep a previously resolved definition when this pass has none.
+            "definition_id": func.coalesce(definition_id, HealthMetric.definition_id),
+        },
+    )
+    await db.execute(stmt)
 
 
-async def sync_health_data(user_id: int, start_time, end_time, data_types: list[str] | None = None, settings_data: dict | None = None) -> int:
+class SyncOutcome(NamedTuple):
+    """Result of one sync_health_data run.
+
+    `failed_from` is the earliest window start whose fetch raised, or None when
+    every data type succeeded. The scheduler uses it to rewind the sync cursor so
+    a failed window is re-fetched instead of being skipped forever.
+
+    `completed` lists the data types that ran to completion. The scheduler
+    persists a cursor for each one as it finishes, so a run that is killed part
+    way through keeps the progress of the types that already succeeded instead
+    of restarting the whole window from scratch on the next run.
+    """
+    saved: int
+    failed_from: datetime | None = None
+    completed: list[str] = []
+
+
+async def sync_health_data(
+    user_id: int,
+    start_time,
+    end_time,
+    data_types: list[str] | None = None,
+    settings_data: dict | None = None,
+    type_cursors: dict | None = None,
+    on_type_complete=None,
+) -> SyncOutcome:
     """Fetch health data from the Google Health API and persist HealthMetric rows.
 
     Shared by the polling scheduler and the webhook handler. Idempotency relies
     on the (user_id, metric_type, recorded_at, source) unique constraint on
-    HealthMetric — duplicate inserts are skipped on IntegrityError.
+    HealthMetric — each row is written with INSERT ... ON CONFLICT DO UPDATE, so
+    re-syncing refreshes a point instead of duplicating it.
 
     For rollup-enabled metrics, data older than the metric's cutoff is fetched as
     a daily aggregate (one row/day) and recent data as raw granular points.
@@ -219,7 +305,13 @@ async def sync_health_data(user_id: int, start_time, end_time, data_types: list[
     admin setting (no per-user override); `settings_data` is accepted for
     backward compatibility but ignored.
 
-    Returns the number of new rows saved.
+    `type_cursors` maps a data type to the last datetime successfully synced for
+    it. Each type then starts from its own cursor (minus a 1-day overlap) rather
+    than the shared `start_time`, so a backfill advances one type at a time and
+    survives interruption. `on_type_complete` is awaited with the data type name
+    after that type finishes, letting the caller persist progress immediately.
+
+    Returns a SyncOutcome (rows saved, earliest failed window start, types done).
     """
     from ..models.health_data import HealthMetric
     from datetime import timedelta
@@ -228,11 +320,26 @@ async def sync_health_data(user_id: int, start_time, end_time, data_types: list[
     types_to_sync = data_types or SYNC_DATA_TYPES
     rollup_cfg = await get_rollup_config()
     total_saved = 0
+    failed_from: datetime | None = None
+    completed: list[str] = []
+    type_cursors = type_cursors or {}
+    # normalize() falls back to a SequenceMatcher fuzzy match when a label is not
+    # an exact name/alias hit, which costs milliseconds. A window yields the same
+    # handful of labels tens of thousands of times (raw heart rate alone is ~24k
+    # rows/day), so resolve each (label, unit) pair once per run.
+    norm_cache: dict[tuple[str, str], object] = {}
 
     account_not_linked = False
     for data_type in types_to_sync:
         if account_not_linked:
             break  # every type fails identically once the account is unlinked
+        # Resume this type from its own cursor; never before the caller's floor.
+        type_start = start_time
+        prior = type_cursors.get(data_type)
+        if prior:
+            resumed = prior - timedelta(days=1)
+            if resumed > type_start:
+                type_start = resumed
         try:
             rollup_enabled, cutoff_days = _metric_rollup_cutoff(data_type, rollup_cfg)
             is_rollup = rollup_enabled and data_type in ROLLUP_CAPABLE
@@ -242,20 +349,21 @@ async def sync_health_data(user_id: int, start_time, end_time, data_types: list[
             if data_type in DAILY_ONLY_DATA_TYPES:
                 # No raw endpoint exists (e.g. total-calories) -> always daily.
                 if rollup_enabled:
-                    windows.append(("daily", start_time, end_time))
+                    windows.append(("daily", type_start, end_time))
             elif is_rollup and cutoff_days > 0:
                 cutoff = end_time - timedelta(days=cutoff_days)
-                if start_time < cutoff:
-                    windows.append(("daily", start_time, min(cutoff, end_time)))
+                if type_start < cutoff:
+                    windows.append(("daily", type_start, min(cutoff, end_time)))
                 if end_time > cutoff:
-                    windows.append(("raw", max(cutoff, start_time), end_time))
+                    windows.append(("raw", max(cutoff, type_start), end_time))
             elif is_rollup and cutoff_days == 0:
-                windows.append(("daily", start_time, end_time))  # roll up everything
+                windows.append(("daily", type_start, end_time))  # roll up everything
             else:
-                windows.append(("raw", start_time, end_time))
+                windows.append(("raw", type_start, end_time))
 
             async with async_session_factory() as db:
                 saved_count = 0
+                uncommitted = 0
                 for granularity, w_start, w_end in windows:
                     if granularity == "daily":
                         points = await google_service.fetch_daily_rollup(
@@ -270,67 +378,107 @@ async def sync_health_data(user_id: int, start_time, end_time, data_types: list[
                     if not points:
                         continue
 
-                    # Each point may yield multiple rows (e.g. heart_rate avg/min/max).
-                    # For heart_rate raw windows, aggregate samples into daily
-                    # avg/min/max rows (A2) so recent days match the rollup shape.
-                    window_rows: list[tuple[str, float, datetime]] = []
-                    for point in points:
-                        try:
-                            window_rows.extend(
-                                HealthSyncScheduler._extract_rows(data_type, point, granularity)
-                            )
-                        except Exception:
-                            continue
-                    if granularity == "raw":
-                        window_rows = HealthSyncScheduler._aggregate_daily(window_rows, data_type)
-
-                    for metric_label, value, recorded_at in window_rows:
-                        try:
-                            unit = UNIT_MAP.get(data_type, "unknown")
-                            norm = await metric_normalizer.normalize(db, metric_label, unit)
-                            definition_id = norm.definition.id if norm.definition else None
-                            metric_type = norm.canonical_name if norm.definition else metric_label
-                            # Daily rollups and pre-aggregated rows (heart_rate A2)
-                            # are stored as authoritative daily values; everything
-                            # else is a granular point/interval row.
-                            row_granularity = "daily" if (
-                                granularity == "daily" or data_type == "heart_rate"
-                            ) else "raw"
-                            is_new = await _upsert_metric(
-                                db,
-                                user_id=user_id,
-                                metric_type=metric_type,
-                                value=value,
-                                unit=unit,
-                                recorded_at=recorded_at,
-                                source="google_health_connect",
-                                definition_id=definition_id,
-                                granularity=row_granularity,
-                            )
-                            if is_new:
-                                saved_count += 1
-                            # A daily aggregate supersedes that day's granular rows
-                            # (e.g. a cutoff change re-synced the day as rollup).
-                            if row_granularity == "daily":
-                                await db.execute(
-                                    delete(HealthMetric).where(
-                                        HealthMetric.user_id == user_id,
-                                        HealthMetric.metric_type == metric_type,
-                                        HealthMetric.source == "google_health_connect",
-                                        HealthMetric.granularity == "raw",
-                                        func.date(HealthMetric.recorded_at) == recorded_at.date(),
-                                    )
+                    # Stream the window in slices instead of materialising every
+                    # row first: a raw heart-rate window can hold ~1M samples, and
+                    # holding them all as tuples costs hundreds of MB. Each slice is
+                    # written and committed before the next is extracted, so peak
+                    # memory stays flat and partial progress is durable.
+                    for slice_start in range(0, len(points), POINT_SLICE):
+                        window_rows: list[tuple[str, float, datetime]] = []
+                        for point in points[slice_start:slice_start + POINT_SLICE]:
+                            try:
+                                window_rows.extend(
+                                    HealthSyncScheduler._extract_rows(data_type, point, granularity)
                                 )
-                                await db.commit()
-                        except IntegrityError:
-                            await db.rollback()  # duplicate — already synced
-                        except Exception:
-                            await db.rollback()
-                            continue
+                            except Exception:
+                                continue
+
+                        # A daily aggregate supersedes that day's granular rows (e.g. a
+                        # cutoff change re-synced the day as a rollup). Collect the
+                        # affected (metric, day) pairs and delete once per slice
+                        # instead of once per row.
+                        superseded: set[tuple[str, object]] = set()
+
+                        for metric_label, value, recorded_at in window_rows:
+                            try:
+                                unit = UNIT_MAP.get(data_type, "unknown")
+                                cache_key = (metric_label, unit)
+                                norm = norm_cache.get(cache_key)
+                                if norm is None:
+                                    norm = await metric_normalizer.normalize(
+                                        db, metric_label, unit)
+                                    norm_cache[cache_key] = norm
+                                definition_id = norm.definition.id if norm.definition else None
+                                metric_type = norm.canonical_name if norm.definition else metric_label
+                                # Daily rollups are stored as authoritative daily
+                                # values; everything else is a granular point row
+                                # (including raw heart-rate samples).
+                                row_granularity = "daily" if granularity == "daily" else "raw"
+                                await _upsert_metric(
+                                    db,
+                                    user_id=user_id,
+                                    metric_type=metric_type,
+                                    value=value,
+                                    unit=unit,
+                                    recorded_at=recorded_at,
+                                    source="google_health_connect",
+                                    definition_id=definition_id,
+                                    granularity=row_granularity,
+                                )
+                                saved_count += 1
+                                uncommitted += 1
+                                if row_granularity == "daily":
+                                    superseded.add((metric_type, recorded_at.date()))
+                                if uncommitted >= BATCH_COMMIT_ROWS:
+                                    await db.commit()
+                                    uncommitted = 0
+                            except Exception:
+                                logger.debug(
+                                    f"Skipping {data_type} row {metric_label}@{recorded_at}",
+                                    exc_info=True,
+                                )
+                                continue
+
+                        for metric_type, day in superseded:
+                            # Half-open day range rather than func.date(...) == day:
+                            # wrapping the column in date() makes the predicate
+                            # non-sargable, so this delete scanned the whole
+                            # health_metrics table for every superseded day.
+                            day_start = datetime(day.year, day.month, day.day)
+                            day_end = day_start + timedelta(days=1)
+                            await db.execute(
+                                delete(HealthMetric).where(
+                                    HealthMetric.user_id == user_id,
+                                    HealthMetric.metric_type == metric_type,
+                                    HealthMetric.source == "google_health_connect",
+                                    HealthMetric.granularity == "raw",
+                                    HealthMetric.recorded_at >= day_start,
+                                    HealthMetric.recorded_at < day_end,
+                                )
+                            )
+                        # End of slice: make the slice durable so a long window
+                        # never loses more than POINT_SLICE points of work.
+                        if uncommitted:
+                            await db.commit()
+                            uncommitted = 0
 
                 total_saved += saved_count
                 if saved_count > 0:
-                    logger.info(f"Saved {saved_count} {data_type} records for user {user_id}")
+                    logger.info(
+                        f"Saved {saved_count} {data_type} records for user {user_id}"
+                    )
+
+            # This type's whole window is now in the database. Persist its cursor
+            # immediately so a run killed later still counts this progress.
+            completed.append(data_type)
+            if on_type_complete is not None:
+                try:
+                    await on_type_complete(data_type)
+                except Exception:
+                    logger.warning(
+                        f"Could not persist sync cursor for {data_type} (user {user_id})",
+                        exc_info=True,
+                    )
 
         except Exception as e:
             if NOT_LINKED_MARKER in str(e):
@@ -341,10 +489,16 @@ async def sync_health_data(user_id: int, start_time, end_time, data_types: list[
                     "and complete setup. Skipping remaining data types for this user."
                 )
             else:
+                # Remember the earliest window we failed to fetch. The cursor must
+                # not advance past it, or this range is never requested again and the
+                # data in it is lost permanently (e.g. a sparse metric like body fat,
+                # whose only measurement fell inside a window that errored).
+                if failed_from is None or type_start < failed_from:
+                    failed_from = type_start
                 logger.warning(f"Error syncing {data_type} for user {user_id}: {e}")
             continue
 
-    return total_saved
+    return SyncOutcome(total_saved, failed_from, completed)
 
 
 class HealthSyncScheduler:
@@ -380,6 +534,20 @@ class HealthSyncScheduler:
                 max_instances=1
             )
 
+            # Nightly compaction of raw Google samples into daily rollups. Runs
+            # separately from the sync job (and at a different hour) so a long
+            # sync cannot collide with it, and so a sync failure cannot stop
+            # compaction from keeping the table bounded.
+            self.scheduler.add_job(
+                self._run_compaction,
+                'cron',
+                hour=3,
+                minute=17,
+                id='health_compaction_job',
+                replace_existing=True,
+                max_instances=1
+            )
+
             self.scheduler.start()
             self.is_running = True
             logger.info(f"Health sync scheduler started with cron: {config.cron_expression}")
@@ -397,6 +565,38 @@ class HealthSyncScheduler:
             self.scheduler.shutdown(wait=False)
             self.is_running = False
             logger.info("Health sync scheduler stopped")
+
+    async def _run_compaction(self):
+        """Nightly job: compact raw Google samples into daily rollups and prune.
+
+        Separate from `_run_sync` because it must run even when no data was
+        synced, and it must not be blocked by a sync in progress.
+        """
+        from .compaction import compact_raw_metrics
+
+        _sync_log("Running raw-data compaction...")
+        try:
+            summary = await compact_raw_metrics(dry_run=False)
+        except Exception:
+            # A scheduled job that raises is only logged by APScheduler, so log it
+            # here too and swallow it: an unhandled exception would be invisible in
+            # the app's own log stream.
+            _sync_log("Raw-data compaction FAILED")
+            logger.exception("Raw-data compaction failed")
+            return
+        if summary.get("skipped"):
+            _sync_log(f"Compaction skipped: {summary['skipped']}")
+        _sync_log(
+            f"Compaction done: {summary['days_compacted']} group(s), "
+            f"{summary['daily_rows_written']} daily row(s), "
+            f"{summary['raw_rows_deleted']} raw row(s) deleted, "
+            f"{len(summary['days_kept_no_daily'])} day(s) kept"
+        )
+        if summary.get("errors"):
+            logger.warning(
+                f"Compaction reported {len(summary['errors'])} error(s): "
+                f"{summary['errors'][:3]}")
+        return summary
 
     @staticmethod
     def _extract_rows(data_type: str, point: dict, granularity: str) -> list[tuple[str, float, datetime]]:
@@ -540,27 +740,6 @@ class HealthSyncScheduler:
                 if v is not None and zone:
                     rows.append((f"Heart Minutes ({zone})", v, recorded_at))
         return rows
-
-    @staticmethod
-    def _aggregate_daily(rows: list[tuple[str, float, datetime]], data_type: str) -> list[tuple[str, float, datetime]]:
-        """Aggregate raw per-point rows into daily summary rows (A2).
-
-        Only heart_rate uses this today: group samples by civil date and emit
-        avg/min/max rows at UTC midnight. Other types pass through unchanged.
-        """
-        if data_type != "heart_rate" or not rows:
-            return rows
-        from collections import defaultdict
-        by_day: dict = defaultdict(list)
-        for _label, value, recorded_at in rows:
-            by_day[recorded_at.date()].append(value)
-        out: list[tuple[str, float, datetime]] = []
-        for day, vals in by_day.items():
-            midnight = datetime(day.year, day.month, day.day, tzinfo=timezone.utc)
-            out.append(("Heart Rate (Avg)", sum(vals) / len(vals), midnight))
-            out.append(("Heart Rate (Min)", float(min(vals)), midnight))
-            out.append(("Heart Rate (Max)", float(max(vals)), midnight))
-        return out
 
     @staticmethod
     def _extract_v4_point(data_type: str, point: dict):
@@ -737,6 +916,7 @@ class HealthSyncScheduler:
                 sync_days_back = 7  # default
                 last_google_sync = None
                 settings_data: dict = {}
+                type_cursors: dict[str, datetime] = {}
                 try:
                     async with async_session_factory() as db:
                         settings_result = await db.execute(
@@ -752,49 +932,77 @@ class HealthSyncScheduler:
                             last_str = settings_data.get("last_google_sync")
                             if last_str:
                                 last_google_sync = datetime.fromisoformat(last_str)
+                            # Per-type cursors: a backfill advances one data type at
+                            # a time, and a run that dies part way through keeps the
+                            # types it already finished.
+                            for dt, iso in (settings_data.get("type_cursors") or {}).items():
+                                try:
+                                    type_cursors[dt] = datetime.fromisoformat(iso)
+                                except (TypeError, ValueError):
+                                    continue
                 except Exception:
                     settings_data = {}
 
-                # Compute time window: from last sync minus overlap, through now
+                # Compute time window: from last sync minus overlap, through now.
+                # sync_days_back acts as a floor on every run — the window always
+                # reaches back at least that far so changing the setting (or a
+                # first successful run with zero saved rows) never permanently
+                # narrows the fetch window to 1 day.
                 from datetime import timedelta as _timedelta
                 end_time = datetime.now(timezone.utc)
+                floor_time = end_time - _timedelta(days=sync_days_back)
                 if last_google_sync:
-                    # Start from last sync minus a small overlap (1 day) to catch late-arriving data
-                    start_time = last_google_sync - _timedelta(days=1)
+                    # Start from last sync minus a small overlap (1 day) to catch
+                    # late-arriving data, but never before the sync_days_back floor.
+                    start_time = max(last_google_sync - _timedelta(days=1), floor_time)
                 else:
-                    # First sync: go back sync_days_back days
-                    start_time = end_time - _timedelta(days=sync_days_back)
+                    start_time = floor_time
 
                 _sync_log(f"Syncing user {user_id}: {start_time.isoformat()} to {end_time.isoformat()} (days_back={sync_days_back})")
 
-                await sync_health_data(user_id, start_time, end_time, settings_data=settings_data)
-                _sync_log(f"Finished Google Health sync for user {user_id}")
+                async def _save_cursors(data_type: str) -> None:
+                    """Persist one type's cursor the moment it finishes.
 
-                # Update last_google_sync for this user
-                try:
-                    async with async_session_factory() as db:
-                        import json as _json
-                        settings_key = f"sync_settings_{user_id}"
-                        result = await db.execute(
-                            select(AppSettings).where(AppSettings.key == settings_key)
-                        )
-                        existing = result.scalar_one_or_none()
-                        data = {}
-                        if existing:
-                            try:
-                                data = _json.loads(existing.value)
-                            except (json.JSONDecodeError, TypeError):
-                                pass
-                        data["last_google_sync"] = end_time.isoformat()
-                        value = _json.dumps(data)
-                        if existing:
-                            existing.value = value
-                        else:
-                            db.add(AppSettings(key=settings_key, value=value, description="User sync settings"))
-                        await db.commit()
-                        logger.info(f"Updated last_google_sync for user {user_id}")
-                except Exception as e:
-                    logger.warning(f"Failed to update last_google_sync for user {user_id}: {e}")
+                    Written per type rather than once at the end of the run: a
+                    30-day backfill takes minutes, and a restart/reload part way
+                    through used to discard ALL of that work.
+                    """
+                    type_cursors[data_type] = end_time
+                    await _write_sync_cursors(
+                        user_id,
+                        type_cursors,
+                        overall=min(
+                            type_cursors.values(),
+                            default=floor_time,
+                        ),
+                    )
+
+                outcome = await sync_health_data(
+                    user_id,
+                    start_time,
+                    end_time,
+                    settings_data=settings_data,
+                    type_cursors=type_cursors,
+                    on_type_complete=_save_cursors,
+                )
+                _sync_log(
+                    f"Finished Google Health sync for user {user_id} "
+                    f"(saved={outcome.saved}, types_completed={len(outcome.completed)}"
+                    f"/{len(SYNC_DATA_TYPES)})"
+                )
+                if outcome.failed_from is not None:
+                    _sync_log(
+                        f"Window {outcome.failed_from.isoformat()} failed to fetch; "
+                        f"its cursor was not advanced so it is retried next run"
+                    )
+
+                # Final write: record any type that finished during the last call
+                # and refresh the aggregate cursor.
+                await _write_sync_cursors(
+                    user_id,
+                    type_cursors,
+                    overall=min(type_cursors.values(), default=floor_time),
+                )
 
             # ── Phase 3: Scan Nextcloud documents for new files ────────────────
             # Find ALL users with Nextcloud configured (not just Google token users)

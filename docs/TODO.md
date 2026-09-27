@@ -1,5 +1,31 @@
 # TODO
 
+## ~~Metric granularity: daily vs. hourly strategy~~ — DONE (2026-09-27)
+
+Implemented [metric-granularity-strategy.md](metric-granularity-strategy.md):
+
+1. `metric_definitions.aggregation` (`sum|avg|avg_minmax|latest`) + `cadence`
+   (`intraday|daily|event`), seeded on startup from
+   `app/services/metric_registry.py` (the fallback for metrics with no
+   definition row). Read path, API and UI all consult it instead of keyword
+   matching.
+2. `_daily_metric_values()` rewritten as SQL (was: load every row into Python —
+   ~250k+ and growing). Aggregation follows the metric; `avg_minmax` metrics get
+   a min/max band and merge their companion series (Heart Rate
+   (Average)/(Minimum)/(Maximum)), so heart rate is ONE continuous series with
+   no hole at the 2026-09-19 raw boundary.
+3. New `metric_hourly` table (hourly tier) + compaction stages: hourly for every
+   closed day (raw kept), early daily close for heart-rate companions, prune at
+   raw retention unchanged. Hourly retention default 730d, editable in
+   Admin → Schedule. Verified: `scripts/test_prune_and_hourly.py`.
+4. `/health/metrics/{type}/series` falls back raw → hourly → daily, so intraday
+   charts keep working past raw retention; `/health/reports/overview` gained
+   `granularity=auto|daily|hourly` (auto = hourly for ≤7d); intraday-types folds
+   companions into the parent and includes hourly-only metrics.
+5. UI: dashboard gained an Activity category + intraday panel and a min–max line
+   on cards; reports chart picks band/point/area styles by `aggregation` and
+   handles hourly labels.
+
 ## ~~Metric daily aggregation + rollup/raw overlap cleanup~~ — DONE (2026-08-19)
 
 Dashboard/reports showed only the latest raw interval row per day (e.g. "2 steps")
@@ -14,9 +40,12 @@ instead of the day's total. Fixed in three parts:
    per (metric, day) — daily rollup wins, else SUM for accumulative metrics
    (steps/distance/calories/minutes/sleep), else latest sample. Used by
    `/health/metrics` and `/health/reports/overview` (dashboard + reports pages).
-3. Ingest (`app/services/scheduler.py`): `_upsert_metric()` updates existing points
-   instead of inserting duplicates; a `daily` row now deletes that day's superseded
-   `raw` rows immediately at sync time.
+3. Ingest (`app/services/scheduler.py`): `_upsert_metric()` writes each point with a
+   single native `INSERT ... ON CONFLICT DO UPDATE` against
+   `uq_health_metric_point`, so re-syncing refreshes a point instead of duplicating
+   it; a `daily` row deletes that day's superseded `raw` rows immediately at sync
+   time (deduped per slice). Rows share a transaction and are committed in
+   batches — see `docs/google-sync-backfill.md`.
 
 ## ~~Seed Google Credentials from environment variables when present~~ — DONE (2026-08-14)
 

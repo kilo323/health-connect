@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import apiClient from '@/lib/api-client';
 import { useUnitConversion } from '@/hooks/useUnitConversion';
+import IntradayChart, { type IntradayOption } from '@/components/IntradayChart';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   ReferenceLine, ReferenceArea,
@@ -44,9 +45,13 @@ interface MetricDefinition {
 interface MetricSummary {
   metric_type: string;
   latest_value: number;
+  latest_min?: number;
+  latest_max?: number;
   unit: string;
   recorded_at: string;
   date: string; // "YYYY-MM-DD" format
+  cadence?: string;
+  aggregation?: string;
   trend: 'up' | 'down' | 'flat' | null;
   trend_pct: number | null;
   recent_avg: number | null;
@@ -98,9 +103,16 @@ const CORE_METRICS: MetricConfig[] = [
   { name: 'Weight', category: 'Body', priority: 1 },
   { name: 'Body Fat Percentage', category: 'Body', priority: 2 },
   { name: 'BMI', category: 'Body', priority: 3 },
+  // Google-synced activity: day-over-day totals, plus the intraday panel below.
+  { name: 'Steps', category: 'Activity', priority: 1 },
+  { name: 'Calories', category: 'Activity', priority: 2 },
+  { name: 'Distance', category: 'Activity', priority: 3 },
+  { name: 'Active Minutes (Light)', category: 'Activity', priority: 4 },
+  { name: 'Sleep', category: 'Activity', priority: 5 },
 ];
 
 const CATEGORY_ORDER = [
+  'Activity',
   'Metabolic & Diabetes',
   'Cardiovascular',
   'Kidney',
@@ -113,6 +125,7 @@ const CATEGORY_ORDER = [
 ];
 
 const CATEGORY_ICONS: Record<string, string> = {
+  'Activity': '🏃',
   'Metabolic & Diabetes': '🩸',
   'Cardiovascular': '❤️',
   'Kidney': '🫘',
@@ -503,6 +516,7 @@ export default function DashboardPage() {
   const [showCustomize, setShowCustomize] = useState(false);
   const [editMetrics, setEditMetrics] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
+  const [intradayTypes, setIntradayTypes] = useState<IntradayOption[]>([]);
 
   useEffect(() => { loadData(); }, [period]);
 
@@ -519,12 +533,17 @@ export default function DashboardPage() {
   const loadData = async () => {
     setLoading(true);
     try {
-      const [reportRes, defsRes] = await Promise.allSettled([
-        apiClient.get('/health/reports/overview', { params: { days: period } }),
+      const [reportRes, defsRes, intradayRes] = await Promise.allSettled([
+        // Cards and sparklines are day-over-day artifacts: always daily series.
+        apiClient.get('/health/reports/overview', {
+          params: { days: period, granularity: 'daily' },
+        }),
         apiClient.get('/health/metrics/definitions'),
+        apiClient.get('/health/metrics/intraday-types'),
       ]);
       if (reportRes.status === 'fulfilled') setReportData(reportRes.value.data);
       if (defsRes.status === 'fulfilled') setDefinitions(defsRes.value.data);
+      if (intradayRes.status === 'fulfilled') setIntradayTypes(intradayRes.value.data || []);
     } catch (error) {
       console.error('Failed to load dashboard data:', error);
     } finally {
@@ -631,6 +650,7 @@ export default function DashboardPage() {
       config: MetricConfig; definition?: MetricDefinition; summary?: MetricSummary;
       trendData: number[]; refLow: number | null; refHigh: number | null;
       displayValue: number | null; displayUnit: string; formattedDisplay: string;
+      displayMin: number | null; displayMax: number | null;
     }>> = {};
     for (const cat of activeCategories) groups[cat] = [];
     for (const config of activeMetrics) {
@@ -644,12 +664,18 @@ export default function DashboardPage() {
       // Convert values to preferred unit
       const converted = convert(config.name, summary.latest_value, summary.unit);
       const convertedTrendData = ts.map((p) => Math.round(convert(config.name, p.value, p.unit).value * 100) / 100);
+      // Day's min/max band (heart rate and anything else avg_minmax)
+      const displayMin = summary.aggregation === 'avg_minmax' && summary.latest_min != null
+        ? convert(config.name, summary.latest_min, summary.unit).value : null;
+      const displayMax = summary.aggregation === 'avg_minmax' && summary.latest_max != null
+        ? convert(config.name, summary.latest_max, summary.unit).value : null;
 
       groups[config.category].push({
         config, definition: def, summary,
         trendData: convertedTrendData, refLow: low, refHigh: high,
         displayValue: converted.value, displayUnit: converted.unit,
         formattedDisplay: formatMetricDisplay(converted.value, converted.unit),
+        displayMin, displayMax,
       });
     }
     for (const cat of activeCategories) groups[cat].sort((a, b) => a.config.priority - b.config.priority);
@@ -770,6 +796,11 @@ export default function DashboardPage() {
         </div>
       </div>
 
+      {/* Intraday detail — hourly/minute view for metrics that keep raw or
+          hourly samples (heart rate, steps, ...). Day-over-day metrics live in
+          the cards below. */}
+      {intradayTypes.length > 0 && <IntradayChart options={intradayTypes} />}
+
       {/* Metric Categories */}
       {activeCategories.map((category) => {
         const metrics = groupedMetrics[category] || [];
@@ -799,6 +830,8 @@ export default function DashboardPage() {
                       value={m.displayValue}
                       unit={m.displayUnit}
                       formattedValue={m.formattedDisplay}
+                      minValue={m.displayMin}
+                      maxValue={m.displayMax}
                       recordedAt={m.summary?.recorded_at}
                       date={m.summary?.date}
                       trend={m.summary?.trend ?? null} trendPct={m.summary?.trend_pct ?? null}

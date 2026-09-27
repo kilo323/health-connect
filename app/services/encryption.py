@@ -11,13 +11,17 @@ class EncryptionService:
         if self._fernet is None:
             key = os.getenv("FERNET_KEY")
             if not key:
-                # Generate a new key for development/testing
-                key = Fernet.generate_key().decode()
                 raise RuntimeError(
-                    "FERNET_KEY environment variable not set. Generated temporary key. "
-                    f"Key (save this!): {key}"
+                    "FERNET_KEY environment variable not set. "
+                    "Generate one with: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
                 )
-            self._fernet = Fernet(key.encode())
+            try:
+                self._fernet = Fernet(key.encode())
+            except ValueError:
+                raise RuntimeError(
+                    f"FERNET_KEY is not a valid Fernet key. It must be exactly 32 url-safe base64-encoded bytes. "
+                    f"Generate a new one with: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+                )
         return self._fernet
 
     def encrypt(self, plaintext: str) -> str:
