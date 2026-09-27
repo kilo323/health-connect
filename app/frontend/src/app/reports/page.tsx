@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import AuthLayout from '@/components/AuthLayout';
-import { Activity, TrendingUp, TrendingDown, Minus, BarChart3, Loader2 } from 'lucide-react';
+import { Activity, TrendingUp, TrendingDown, Minus, BarChart3, Loader2, X } from 'lucide-react';
 import apiClient from '@/lib/api-client';
 import { useUnitConversion } from '@/hooks/useUnitConversion';
 import {
@@ -157,6 +157,16 @@ export default function ReportsPage() {
     loadReport();
   }, [period]);
 
+  // Close the detail modal on Escape (same behaviour as the dashboard).
+  useEffect(() => {
+    if (!selectedMetric) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setSelectedMetric(null);
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [selectedMetric]);
+
   const loadReport = async () => {
     setLoading(true);
     try {
@@ -165,13 +175,11 @@ export default function ReportsPage() {
         params: { days: period, granularity: 'auto' },
       });
       setData(res.data);
-      // Auto-select first metric with time series data
-      if (!selectedMetric && res.data?.summary?.length > 0) {
-        const withData = res.data.summary.find((s: MetricSummary) =>
-          res.data.time_series[s.metric_type]?.length > 0
-        );
-        if (withData) setSelectedMetric(withData.metric_type);
-      }
+      // A metric is only shown when the user clicks its card: the detail chart
+      // is a modal, so nothing is auto-selected on load.
+      setSelectedMetric((cur) =>
+        cur && !res.data?.time_series?.[cur]?.length ? null : cur
+      );
     } catch (error) {
       console.error('Failed to load report:', error);
     } finally {
@@ -255,7 +263,9 @@ export default function ReportsPage() {
                 return (
                   <div
                     key={item.metric_type}
-                    onClick={() => setSelectedMetric(item.metric_type)}
+                    onClick={() => setSelectedMetric(
+                      selectedMetric === item.metric_type ? null : item.metric_type
+                    )}
                     className={`card cursor-pointer transition-all hover:shadow-md ${
                       selectedMetric === item.metric_type ? 'ring-2 ring-blue-500 shadow-md' : ''
                     }`}
@@ -307,155 +317,188 @@ export default function ReportsPage() {
             </div>
           )}
 
-          {/* Chart */}
-          {selectedMetric && chartData.length > 0 && (() => {
-            // Convert chart data to preferred unit (incl. the min/max band)
-            const round = (n: number) => Math.round(n * 100) / 100;
-            const convertedChartData = chartData.map((p) => {
-              const c = convert(selectedMetric, p.value, p.unit);
-              return {
-                ...p,
-                value: round(c.value),
-                min: p.min != null ? round(convert(selectedMetric, p.min, p.unit).value) : round(c.value),
-                max: p.max != null ? round(convert(selectedMetric, p.max, p.unit).value) : round(c.value),
-                unit: c.unit,
-              };
-            });
-            const chartUnit = convertedChartData[0]?.unit || '';
-            const color = METRIC_COLORS[selectedMetric] || '#3b82f6';
-            const summaryItem = summary.find((s) => s.metric_type === selectedMetric);
-            // avg_minmax -> min/max band with an average line; event -> plain
-            // points with no interpolated fill (labs are dated tests, not trends).
-            const band = summaryItem?.aggregation === 'avg_minmax';
-            const event = summaryItem?.cadence === 'event';
-            const hourly = data?.granularity === 'hourly';
-
-            return (
-            <div className="card">
-              <div className="flex items-center justify-between mb-4">
-                <h2 className="text-lg font-semibold text-gray-900">
-                  {METRIC_LABELS[selectedMetric] || selectedMetric.replace(/_/g, ' ')} Trend
-                </h2>
-                <span className="text-sm text-gray-500">
-                  {convertedChartData.length} data point{convertedChartData.length !== 1 ? 's' : ''} over {getRangeLabel(period)}
-                  {hourly ? ' (hourly)' : ''}
-                  {band ? ' · avg with min–max band' : ''}
-                </span>
-              </div>
-              <div className="h-72">
-                <ResponsiveContainer width="100%" height="100%">
-                  <ComposedChart data={convertedChartData} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
-                    {!band && !event && (
-                      <defs>
-                        <linearGradient id={`gradient-${selectedMetric}`} x1="0" y1="0" x2="0" y2="1">
-                          <stop
-                            offset="5%"
-                            stopColor={color}
-                            stopOpacity={0.3}
-                          />
-                          <stop
-                            offset="95%"
-                            stopColor={color}
-                            stopOpacity={0}
-                          />
-                        </linearGradient>
-                      </defs>
-                    )}
-                    <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
-                    <XAxis
-                      dataKey="date"
-                      tick={{ fontSize: 12 }}
-                      tickFormatter={(v: string) => {
-                        const d = pointDate(v);
-                        return isHourlyLabel(v)
-                          ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-                          : `${d.getMonth() + 1}/${d.getDate()}`;
-                      }}
-                    />
-                    <YAxis tick={{ fontSize: 12 }} width={60} />
-                    <Tooltip
-                      labelFormatter={(v) => {
-                        const s = String(v ?? '');
-                        const d = pointDate(s);
-                        return isHourlyLabel(s)
-                          ? d.toLocaleString([], {
-                              month: 'long', day: 'numeric', year: 'numeric',
-                              hour: '2-digit', minute: '2-digit',
-                            })
-                          : d.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
-                      }}
-                      formatter={(value) => [
-                        `${formatValue(Number(value), chartUnit)} ${formatUnit(chartUnit)}`,
-                        METRIC_LABELS[selectedMetric] || selectedMetric,
-                      ]}
-                    />
-                    {band && (
-                      <Area
-                        dataKey="max"
-                        stroke="none"
-                        fill={color}
-                        fillOpacity={0.18}
-                        name="max"
-                        isAnimationActive={false}
-                      />
-                    )}
-                    {band && (
-                      <Area
-                        dataKey="min"
-                        stroke="none"
-                        fill="#ffffff"
-                        fillOpacity={0.95}
-                        name="min"
-                        isAnimationActive={false}
-                      />
-                    )}
-                    {band && (
-                      <Line
-                        type="monotone"
-                        dataKey="value"
-                        stroke={color}
-                        strokeWidth={2}
-                        dot={false}
-                        name="avg"
-                        isAnimationActive={false}
-                      />
-                    )}
-                    {event && (
-                      <Line
-                        type="monotone"
-                        dataKey="value"
-                        stroke={color}
-                        strokeWidth={2}
-                        dot={{ r: 3, fill: color }}
-                        name="value"
-                        isAnimationActive={false}
-                      />
-                    )}
-                    {!band && !event && (
-                      <Area
-                        type="monotone"
-                        dataKey="value"
-                        stroke={color}
-                        strokeWidth={2}
-                        fill={`url(#gradient-${selectedMetric})`}
-                        name="value"
-                      />
-                    )}
-                  </ComposedChart>
-                </ResponsiveContainer>
-              </div>
-            </div>
-            );
-          })()}
-
-          {selectedMetric && chartData.length === 0 && summary.length > 0 && (
-            <div className="card text-center py-8">
-              <p className="text-gray-500">
-                No chart data for {METRIC_LABELS[selectedMetric] || selectedMetric} in the last {getRangeLabel(period)}.
-              </p>
-            </div>
-          )}
         </>
+      )}
+
+      {/* Detail chart modal — same interaction as the dashboard: click a card
+          to pop the chart, Escape/backdrop/X to close. */}
+      {selectedMetric && (
+        <div
+          className="fixed inset-0 z-50 flex items-end sm:items-center justify-center"
+          onClick={(e) => { if (e.target === e.currentTarget) setSelectedMetric(null); }}
+          role="dialog"
+          aria-modal="true"
+          aria-label={`${selectedMetric} detail`}
+        >
+          {/* Backdrop */}
+          <div className="absolute inset-0 bg-black/40" />
+
+          {/* Panel: bottom sheet on mobile, centered card on desktop */}
+          <div className="relative w-full sm:w-[85vw] lg:w-[75vw] xl:w-[65vw] sm:max-w-5xl mx-0 sm:mx-6
+                          bg-white rounded-t-2xl sm:rounded-2xl shadow-2xl
+                          max-h-[85vh] overflow-y-auto">
+            {/* Mobile drag handle */}
+            <div className="flex justify-center pt-3 sm:hidden">
+              <div className="w-10 h-1 rounded-full bg-gray-300" />
+            </div>
+            <div className="sticky top-0 z-10 flex items-center justify-between px-6 pt-4 pb-3 bg-white border-b border-gray-100">
+              <h2 className="text-lg font-semibold text-gray-900">
+                {METRIC_LABELS[selectedMetric] || selectedMetric.replace(/_/g, ' ')}
+                <span className="ml-3 text-sm font-normal text-gray-500">
+                  {chartData.length} data point{chartData.length !== 1 ? 's' : ''}
+                  {' '}over {getRangeLabel(period)}
+                  {data?.granularity === 'hourly' ? ' (hourly)' : ''}
+                  {summary.find((s) => s.metric_type === selectedMetric)?.aggregation === 'avg_minmax'
+                    ? ' · avg with min–max band' : ''}
+                </span>
+              </h2>
+              <button
+                onClick={() => setSelectedMetric(null)}
+                className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors cursor-pointer"
+                aria-label="Close"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <div className="px-6 sm:px-8 pb-6 sm:pb-8">
+              {chartData.length > 0 && (() => {
+                // Convert chart data to preferred unit (incl. the min/max band)
+                const round = (n: number) => Math.round(n * 100) / 100;
+                const convertedChartData = chartData.map((p) => {
+                  const c = convert(selectedMetric, p.value, p.unit);
+                  return {
+                    ...p,
+                    value: round(c.value),
+                    min: p.min != null ? round(convert(selectedMetric, p.min, p.unit).value) : round(c.value),
+                    max: p.max != null ? round(convert(selectedMetric, p.max, p.unit).value) : round(c.value),
+                    unit: c.unit,
+                  };
+                });
+                const chartUnit = convertedChartData[0]?.unit || '';
+                const color = METRIC_COLORS[selectedMetric] || '#3b82f6';
+                const summaryItem = summary.find((s) => s.metric_type === selectedMetric);
+                // avg_minmax -> min/max band with an average line; event -> plain
+                // points with no interpolated fill (labs are dated tests, not trends).
+                const band = summaryItem?.aggregation === 'avg_minmax';
+                const event = summaryItem?.cadence === 'event';
+
+                return (
+                <div className="h-72 sm:h-96">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <ComposedChart data={convertedChartData} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
+                      {!band && !event && (
+                        <defs>
+                          <linearGradient id={`gradient-${selectedMetric}`} x1="0" y1="0" x2="0" y2="1">
+                            <stop
+                              offset="5%"
+                              stopColor={color}
+                              stopOpacity={0.3}
+                            />
+                            <stop
+                              offset="95%"
+                              stopColor={color}
+                              stopOpacity={0}
+                            />
+                          </linearGradient>
+                        </defs>
+                      )}
+                      <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+                      <XAxis
+                        dataKey="date"
+                        tick={{ fontSize: 12 }}
+                        tickFormatter={(v: string) => {
+                          const d = pointDate(v);
+                          return isHourlyLabel(v)
+                            ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                            : `${d.getMonth() + 1}/${d.getDate()}`;
+                        }}
+                      />
+                      <YAxis tick={{ fontSize: 12 }} width={60} />
+                      <Tooltip
+                        labelFormatter={(v) => {
+                          const s = String(v ?? '');
+                          const d = pointDate(s);
+                          return isHourlyLabel(s)
+                            ? d.toLocaleString([], {
+                                month: 'long', day: 'numeric', year: 'numeric',
+                                hour: '2-digit', minute: '2-digit',
+                              })
+                            : d.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+                        }}
+                        formatter={(value) => [
+                          `${formatValue(Number(value), chartUnit)} ${formatUnit(chartUnit)}`,
+                          METRIC_LABELS[selectedMetric] || selectedMetric,
+                        ]}
+                      />
+                      {band && (
+                        <Area
+                          dataKey="max"
+                          stroke="none"
+                          fill={color}
+                          fillOpacity={0.18}
+                          name="max"
+                          isAnimationActive={false}
+                        />
+                      )}
+                      {band && (
+                        <Area
+                          dataKey="min"
+                          stroke="none"
+                          fill="#ffffff"
+                          fillOpacity={0.95}
+                          name="min"
+                          isAnimationActive={false}
+                        />
+                      )}
+                      {band && (
+                        <Line
+                          type="monotone"
+                          dataKey="value"
+                          stroke={color}
+                          strokeWidth={2}
+                          dot={false}
+                          name="avg"
+                          isAnimationActive={false}
+                        />
+                      )}
+                      {event && (
+                        <Line
+                          type="monotone"
+                          dataKey="value"
+                          stroke={color}
+                          strokeWidth={2}
+                          dot={{ r: 3, fill: color }}
+                          name="value"
+                          isAnimationActive={false}
+                        />
+                      )}
+                      {!band && !event && (
+                        <Area
+                          type="monotone"
+                          dataKey="value"
+                          stroke={color}
+                          strokeWidth={2}
+                          fill={`url(#gradient-${selectedMetric})`}
+                          name="value"
+                        />
+                      )}
+                    </ComposedChart>
+                  </ResponsiveContainer>
+                </div>
+                );
+              })()}
+
+              {chartData.length === 0 && (
+                <div className="text-center py-8">
+                  <p className="text-gray-500">
+                    No chart data for {METRIC_LABELS[selectedMetric] || selectedMetric} in the last {getRangeLabel(period)}.
+                  </p>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
       )}
     </AuthLayout>
   );
