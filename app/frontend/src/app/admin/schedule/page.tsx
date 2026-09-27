@@ -341,24 +341,26 @@ export default function AdminSchedulePage() {
             </div>
           )}
 
-           <button
-            type="button"
-            onClick={handleSyncNow}
-            disabled={syncInProgress}
-            className="btn-secondary flex items-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
-          >
-            {syncInProgress ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
-            {syncInProgress ? 'Syncing...' : 'Sync Now'}
-          </button>
-           <button
-            type="button"
-            onClick={handleBackfill}
-            disabled={syncInProgress || backfilling}
-            className="btn-secondary flex items-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
-          >
-            {backfilling ? <Loader2 className="h-4 w-4 animate-spin" /> : <Database className="h-4 w-4" />}
-            {backfilling ? 'Backfilling...' : 'Backfill All Data'}
-          </button>
+          <div className="flex gap-2 flex-wrap">
+            <button
+              type="button"
+              onClick={handleSyncNow}
+              disabled={syncInProgress}
+              className="btn-secondary flex items-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
+            >
+              {syncInProgress ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+              {syncInProgress ? 'Syncing...' : 'Sync Now'}
+            </button>
+            <button
+              type="button"
+              onClick={handleBackfill}
+              disabled={syncInProgress || backfilling}
+              className="btn-secondary flex items-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
+            >
+              {backfilling ? <Loader2 className="h-4 w-4 animate-spin" /> : <Database className="h-4 w-4" />}
+              {backfilling ? 'Backfilling...' : 'Backfill All Data'}
+            </button>
+          </div>
         </div>
 
         {/* Raw Data Retention Section */}
