@@ -127,15 +127,22 @@ export default function AdminSchedulePage() {
     }
   };
 
-  const handleSave = async () => {
-    if (!settings.cron_expression) return;
+  const handleSave = async (next?: ScheduleSettings) => {
+    // Allow a caller (the enable/disable toggle) to pass the state it wants
+    // persisted — React state updates are async, so reading `settings` right
+    // after setSettings() would still send the old value.
+    const payload = next ?? settings;
+    if (!payload.cron_expression) return;
 
+    if (next) {
+      setSettings(next);
+    }
     setSaving(true);
     try {
-      await apiClient.put('/admin/settings/schedule', settings);
+      await apiClient.put('/admin/settings/schedule', payload);
       setSaved(true);
       setTimeout(() => setSaved(false), 3000);
-      
+
       // Reload scheduler status
       const statusRes = await apiClient.get('/admin/status/scheduler');
       if (statusRes.data.is_running) {
@@ -149,7 +156,11 @@ export default function AdminSchedulePage() {
   };
 
   const handleToggle = async () => {
-    await handleSave();
+    // The button label reflects the CURRENT state, so clicking it must send
+    // the inverted state. Previously it called handleSave() unchanged, which
+    // re-submitted is_enabled=false and stopped the scheduler on every
+    // "Enable" click.
+    await handleSave({ ...settings, is_enabled: !settings.is_enabled });
   };
 
   const handleSyncNow = async () => {
@@ -214,7 +225,7 @@ export default function AdminSchedulePage() {
       <h1 className="text-2xl font-bold text-gray-900 mb-6">Schedule Configuration</h1>
 
       <div className="card max-w-2xl">
-        <div className="flex items-center justify-between mb-6">
+        <div className="flex items-center justify-between gap-4 mb-6 flex-wrap">
           <div className="flex items-center gap-3">
             <Database className="h-8 w-8 text-blue-600" />
             <div>
@@ -226,7 +237,7 @@ export default function AdminSchedulePage() {
           <button
             onClick={handleToggle}
             disabled={saving}
-            className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-colors ${
+            className={`flex shrink-0 items-center gap-2 px-4 py-2 rounded-lg font-medium transition-colors ${
               settings.is_enabled 
                 ? 'bg-red-100 text-red-700 hover:bg-red-200' 
                 : 'bg-green-100 text-green-700 hover:bg-green-200'

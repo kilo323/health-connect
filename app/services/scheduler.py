@@ -1,4 +1,5 @@
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, delete
 import asyncio
@@ -504,12 +505,22 @@ async def sync_health_data(
 class HealthSyncScheduler:
     def __init__(self):
         self.scheduler = AsyncIOScheduler()
-        self.is_running = False
         self._sync_in_progress = False
 
     @property
     def sync_in_progress(self) -> bool:
         return self._sync_in_progress
+
+    @property
+    def is_running(self) -> bool:
+        """Whether the underlying APScheduler is actually running.
+
+        A property (not an instance attribute) so it can never shadow itself:
+        an ``is_running = False`` assignment in ``__init__`` previously
+        replaced this method on the instance, making ``scheduler.is_running()``
+        raise ``TypeError: 'bool' object is not callable``.
+        """
+        return self.scheduler.running
 
     async def start(self):
         """Start the scheduler if enabled"""
@@ -524,11 +535,14 @@ class HealthSyncScheduler:
                 logger.info("Health sync scheduler disabled")
                 return
 
-            # Add the scheduled job
+            # Add the scheduled job. APScheduler 3.x has no `expression=`
+            # kwarg on CronTrigger — a 5-field crontab string must go through
+            # CronTrigger.from_crontab(), otherwise add_job() raises TypeError
+            # (silently swallowed by the except below, so the scheduler never
+            # started even though enable() returned OK).
             self.scheduler.add_job(
                 self._run_sync,
-                'cron',
-                expression=config.cron_expression,
+                CronTrigger.from_crontab(config.cron_expression),
                 id='health_sync_job',
                 replace_existing=True,
                 max_instances=1
@@ -548,22 +562,32 @@ class HealthSyncScheduler:
                 max_instances=1
             )
 
+            # Safe to call repeatedly: replace_existing=True updates the cron
+            # in place, and the running check below stops us from calling
+            # AsyncIOScheduler.start() twice (which raises).
+            if self.scheduler.running:
+                logger.info(
+                    f"Health sync scheduler already running with cron: {config.cron_expression}"
+                )
+                return
             self.scheduler.start()
-            self.is_running = True
             logger.info(f"Health sync scheduler started with cron: {config.cron_expression}")
 
         except Exception as e:
-            logger.error(f"Failed to start scheduler: {e}")
-
-    def is_running(self) -> bool:
-        """Return whether the scheduled scheduler is currently running."""
-        return self.scheduler.running
+            # exc_info so a failure here (e.g. a bad cron string or an invalid
+            # add_job kwarg) is visible in the logs instead of silently
+            # leaving the scheduler stopped while the UI reports enabled.
+            logger.exception(f"Failed to start scheduler: {e}")
 
     async def stop(self):
         """Stop the scheduler"""
         if self.scheduler.running:
             self.scheduler.shutdown(wait=False)
-            self.is_running = False
+            # APScheduler's shutdown() is deferred via call_soon_threadsafe, so
+            # `running` stays True until the loop runs that callback. Yield once
+            # so is_running is accurate by the time stop() returns — otherwise a
+            # quick disable→enable sees "already running" and skips the restart.
+            await asyncio.sleep(0)
             logger.info("Health sync scheduler stopped")
 
     async def _run_compaction(self):
@@ -1147,15 +1171,14 @@ class HealthSyncScheduler:
 
     def update_schedule(self, cron_expression: str):
         """Update the schedule for the running scheduler"""
-        if self.scheduler.running and self.is_running:
+        if self.is_running:
             # Remove existing job
             self.scheduler.remove_job('health_sync_job')
             
             # Add new job with updated cron expression
             self.scheduler.add_job(
                 self._run_sync,
-                'cron',
-                expression=cron_expression,
+                CronTrigger.from_crontab(cron_expression),
                 id='health_sync_job',
                 replace_existing=True,
                 max_instances=1

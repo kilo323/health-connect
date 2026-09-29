@@ -237,13 +237,19 @@ async def update_schedule_settings(
     
     await db.commit()
     
-    # Restart scheduler if needed
+    # Restart scheduler if needed.
+    # `scheduler.start()` re-reads the config row we just committed and is
+    # idempotent (safe to call when already running), so branch purely on the
+    # requested enabled state. The old `settings.is_enabled and not existing`
+    # condition skipped start() whenever a config row already existed — which
+    # is the normal case after the first save — so the enable button did
+    # nothing.
     from ..services.scheduler import scheduler
-    
-    if settings.is_enabled and not existing:
-        await scheduler.start(settings.cron_expression)
+
+    if settings.is_enabled:
+        await scheduler.start()
         logger.info(f"Scheduler started with cron: {settings.cron_expression}")
-    elif not settings.is_enabled and existing:
+    else:
         await scheduler.stop()
         logger.info("Scheduler stopped")
     
@@ -309,7 +315,7 @@ async def get_scheduler_status(
     from ..services.scheduler import scheduler
     
     return {
-        "is_running": scheduler.is_running(),
+        "is_running": scheduler.is_running,
         "sync_in_progress": scheduler.sync_in_progress,
         "next_run": None  # Could be implemented to show next scheduled run time
     }
