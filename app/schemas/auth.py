@@ -1,5 +1,5 @@
 from pydantic import BaseModel, EmailStr
-from typing import Optional
+from typing import Literal, Optional
 from datetime import datetime
 
 
@@ -68,13 +68,29 @@ class UnitPreferenceResponse(BaseModel):
         from_attributes = True
 
 
-class MetricSearchResult(BaseModel):
+class UnitSystemSet(BaseModel):
+    """Global measurement system. Send null to fall back to per-metric units only."""
+    unit_system: Literal["metric", "imperial"] | None = None
+
+
+class MetricUnitView(BaseModel):
+    """One metric definition with its resolved display state for the current user."""
     id: int
     name: str
     category: str | None
     canonical_unit: str | None
     available_units: list[str]
-    preferred_unit: str | None = None  # user's current preference, if set
+    aliases: list[str] = []
+    unit_conversions: dict = {}
+    preferred_unit: str | None = None      # explicit per-metric override, if any
+    system_unit: str | None = None         # what the global system selects, if anything
+    effective_unit: str | None = None      # what will actually be displayed
+
+
+class UnitsOverview(BaseModel):
+    """Everything the client needs to render units and pick new preferences."""
+    unit_system: str | None
+    metrics: list[MetricUnitView]
 
 
 class DashboardMetricsSet(BaseModel):

@@ -193,6 +193,23 @@ reads the flag. Don't add behaviour on top of it.
   dashboard and reports consistent on this.
 - Per-metric unit conversion goes through `useUnitConversion` + the `user_unit_preferences`
   table; store canonical units (kg, meters) and convert for display.
+- Display units resolve in three layers, all server-side in `GET /api/users/me/units`:
+  explicit `user_unit_preferences` row → the user's `users.unit_system`
+  (`metric` | `imperial` | NULL) → the definition's canonical unit. The client only
+  applies the resulting `effective_unit`; don't reimplement the precedence in a
+  component.
+- Which unit belongs to which system is decided in `app/services/unit_systems.py` from the
+  **unit name** (mass/length/temperature), never from the metric name. A unit only switches
+  if `metric_definitions.unit_conversions` actually has a **numeric** factor for it.
+- `init_db()` backfills `unit_conversions` on every startup (see `seed_missing_factors`): a
+  declared-but-null factor gets its exact physical value, and a unit the sync actually
+  stores (derived from `scheduler.UNIT_MAP`) is added when the map cannot convert it. Factors
+  are derived from one base-per-dimension table, so they cannot drift apart. **Existing
+  numeric factors are never overwritten** — that is the escape hatch for a definition whose
+  conversion genuinely differs, so change it in Admin → Metric Definitions.
+- The factor direction is **alternates per one canonical unit** (`1 kg = factor × lb`), because
+  both the frontend `convert()` and the admin UI read it that way. 1 kg = 2.20462 lb, not
+  0.453592.
 
 ### Scripts boundary
 

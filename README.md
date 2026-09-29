@@ -28,8 +28,9 @@ units and reference ranges.
   reference ranges. Definitions live in the database and are managed in the admin UI
   (manual CRUD plus an LLM proposal workflow for unmatched metrics).
 - **Dashboards & reports** — daily charts with per-metric min–max bands, an intraday
-  activity panel, per-metric unit preferences (e.g. view weight in lb while it is
-  stored in kg), and a health-data browser for raw points.
+  activity panel, a global measurement-system toggle (switch everything to metric or
+  imperial) with per-metric overrides on top (e.g. view weight in lb while it is stored in
+  kg), and a health-data browser for raw points.
 - **Nextcloud integration** — browse, create folders and pull documents from a
   Nextcloud folder.
 - **Multi-user** — JWT auth, per-user Google/Nextcloud connections, and an admin area

@@ -3,6 +3,16 @@
 import { useState, useEffect, useCallback } from 'react';
 import apiClient from '@/lib/api-client';
 
+export type UnitSystem = 'metric' | 'imperial' | null;
+
+/** Dispatched on `window` after a unit preference or the measurement system changes. */
+export const UNIT_PREFERENCES_CHANGED = 'unit-preferences-changed';
+
+/** Tell every mounted useUnitConversion consumer to reload. */
+export function notifyUnitPreferencesChanged() {
+  window.dispatchEvent(new Event(UNIT_PREFERENCES_CHANGED));
+}
+
 interface MetricDefinition {
   id: number;
   name: string;
@@ -11,12 +21,21 @@ interface MetricDefinition {
   aliases: string[];
 }
 
-interface UnitPreference {
-  id: number;
-  metric_definition_id: number;
-  metric_name: string;
+interface MetricUnitView extends MetricDefinition {
+  /** The definition's stored unit. `unit` mirrors it for convert()/getDisplayUnit(). */
   canonical_unit: string | null;
-  preferred_unit: string;
+  available_units: string[];
+  /** Explicit per-metric override chosen by the user, if any. */
+  preferred_unit: string | null;
+  /** What the global measurement system selects for this metric, if anything. */
+  system_unit: string | null;
+  /** What will actually be displayed: override, else system, else canonical. */
+  effective_unit: string | null;
+}
+
+interface UnitsOverview {
+  unit_system: UnitSystem;
+  metrics: MetricUnitView[];
 }
 
 export interface ConvertedMetric {
@@ -29,37 +48,50 @@ export interface ConvertedMetric {
  * then provides a `convert` function to transform values to the user's
  * preferred display unit.
  *
+ * The effective unit per metric is resolved server-side in
+ * `/api/users/me/units`: an explicit per-metric preference wins, then the user's
+ * global measurement system (metric/imperial), then the canonical unit.
+ *
  * unit_conversions maps: alternate_unit → factor where `1 canonical = factor alternate`
- * (e.g., for Weight with canonical "lb": {"kg": 0.453592} means 1 lb = 0.453592 kg)
+ * (e.g., for Weight with canonical "kg": {"lb": 0.453592} means 1 kg = 0.453592 lb)
  */
 export function useUnitConversion() {
   const [definitions, setDefinitions] = useState<MetricDefinition[]>([]);
-  const [preferences, setPreferences] = useState<Map<string, string>>(new Map()); // lowercase metric name → preferred unit
+  const [preferences, setPreferences] = useState<Map<string, string>>(new Map()); // lowercase metric name → effective unit
+  const [unitSystem, setUnitSystem] = useState<UnitSystem>(null);
+  const [metrics, setMetrics] = useState<MetricUnitView[]>([]);
   const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
     loadData();
   }, []);
 
+  // Reload when the profile page changes a preference, so already-mounted
+  // dashboard/reports views pick it up without a remount.
+  useEffect(() => {
+    window.addEventListener(UNIT_PREFERENCES_CHANGED, loadData);
+    return () => window.removeEventListener(UNIT_PREFERENCES_CHANGED, loadData);
+  }, []);
+
   const loadData = async () => {
     try {
-      const [defsRes, prefsRes] = await Promise.allSettled([
-        apiClient.get('/health/metrics/definitions'),
-        apiClient.get('/users/me/unit-preferences'),
-      ]);
+      const res = await apiClient.get('/users/me/units');
+      const data: UnitsOverview = res.data;
+      const list = data?.metrics || [];
 
-      if (defsRes.status === 'fulfilled') {
-        setDefinitions(defsRes.value.data || []);
-      }
+      setMetrics(list);
+      setUnitSystem(data?.unit_system ?? null);
+      // The overview names the stored unit `canonical_unit`; the conversion
+      // helpers below work off `unit`, so mirror it.
+      setDefinitions(list.map((m) => ({ ...m, unit: m.canonical_unit })));
 
-      if (prefsRes.status === 'fulfilled') {
-        const prefs: UnitPreference[] = prefsRes.value.data || [];
-        const prefMap = new Map<string, string>();
-        for (const p of prefs) {
-          prefMap.set(p.metric_name.toLowerCase(), p.preferred_unit);
+      const prefMap = new Map<string, string>();
+      for (const m of list) {
+        if (m.effective_unit) {
+          prefMap.set(m.name.toLowerCase(), m.effective_unit);
         }
-        setPreferences(prefMap);
       }
+      setPreferences(prefMap);
     } catch (err) {
       console.error('Failed to load unit conversion data:', err);
     } finally {
@@ -112,7 +144,7 @@ export function useUnitConversion() {
       let canonicalValue = value;
       if (unit.toLowerCase() !== canonicalUnit.toLowerCase()) {
         // Look up the source unit in conversions
-        // conversions[altUnit] = factor means: 1 canonical = factor alt
+        // conversions[altUnit] = factor means: 1 canonical = factor alternate
         // So: canonical_value = alt_value / factor
         const factor = findConversionFactor(conversions, unit);
         if (factor == null) {
@@ -152,11 +184,7 @@ export function useUnitConversion() {
    * Format a metric value for display, handling compound units like feet/inches.
    *
    * For simple units: returns the number formatted as a string.
-   * For compound units (e.g., "feet"): returns "X'Y\"" format.
-   *
-   * @param value  The numeric value
-   * @param unit   The display unit (after conversion)
-   * @returns      A formatted display string
+   * For compound units (e.g., "feet"): returns "X'Y"" format.
    */
   const formatValue = useCallback(
     (value: number | null, unit: string): string => {
@@ -179,13 +207,14 @@ export function useUnitConversion() {
     []
   );
 
-  return { convert, getDisplayUnit, formatValue, findDefinition, loaded, refresh: loadData };
+  return { convert, getDisplayUnit, formatValue, findDefinition, unitSystem, metrics, loaded, refresh: loadData };
 }
 
 /**
  * Normalize common unit aliases and metric prefixes so the lookup succeeds
  * even when the stored unit doesn't exactly match the conversion map key
  * (e.g. "meters" vs "m", "kilograms" vs "kg", "centimeters" vs "cm").
+ * Mirrors normalize_unit() in app/services/unit_systems.py.
  */
 function normalizeUnit(unit: string): string {
   const lower = unit.toLowerCase().trim();
@@ -214,6 +243,10 @@ function normalizeUnit(unit: string): string {
     inch: 'inches',
     ft: 'feet',
     foot: 'feet',
+    mi: 'miles',
+    mile: 'miles',
+    yd: 'yards',
+    yard: 'yards',
     oz: 'ounces',
     ounce: 'ounces',
     'fl oz': 'fluid ounces',

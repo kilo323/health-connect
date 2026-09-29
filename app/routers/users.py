@@ -1,9 +1,8 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from passlib.context import CryptContext
 from jose import jwt, JWTError
-from difflib import SequenceMatcher
 import json
 import os
 from typing import List
@@ -11,10 +10,16 @@ from typing import List
 from ..database import get_db, async_session_factory
 from ..models.user import User, Role, UserUnitPreference
 from ..models.health_data import MetricDefinition
+from ..services.unit_systems import (
+    effective_unit,
+    parse_conversions,
+    system_unit_for,
+)
 from ..schemas.auth import (
     UserCreate, UserUpdate, UserResponse, LoginResponse,
     ProfileUpdate, PasswordChange, UnitPreferenceSet, UnitPreferenceResponse,
-    MetricSearchResult, DashboardMetricsSet, DashboardMetricsResponse,
+    UnitSystemSet, UnitsOverview, MetricUnitView,
+    DashboardMetricsSet, DashboardMetricsResponse,
 )
 
 router = APIRouter(tags=["Users"])
@@ -99,6 +104,17 @@ def _available_units(definition: MetricDefinition) -> list[str]:
         except (json.JSONDecodeError, TypeError):
             pass
     return units
+
+
+def _aliases(definition: MetricDefinition) -> list[str]:
+    """Alternate names for a metric definition, as stored in the aliases column."""
+    if not definition.aliases:
+        return []
+    try:
+        parsed = json.loads(definition.aliases)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    return [a for a in parsed if isinstance(a, str)] if isinstance(parsed, list) else []
 
 
 @router.put("/me", response_model=UserResponse)
@@ -220,6 +236,22 @@ async def set_unit_preference(
     return {"message": f"Preference set: {definition.name} -> {pref.preferred_unit}"}
 
 
+@router.delete("/me/unit-preferences")
+async def clear_unit_preferences(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Remove every per-metric unit override, leaving the global system in charge."""
+    result = await db.execute(
+        select(UserUnitPreference).where(UserUnitPreference.user_id == current_user.id)
+    )
+    prefs = result.scalars().all()
+    for pref in prefs:
+        await db.delete(pref)
+    await db.commit()
+    return {"message": f"Cleared {len(prefs)} per-metric unit override(s)"}
+
+
 @router.delete("/me/unit-preferences/{metric_definition_id}")
 async def delete_unit_preference(
     metric_definition_id: int,
@@ -242,76 +274,62 @@ async def delete_unit_preference(
     return {"message": "Preference removed"}
 
 
-@router.get("/me/unit-preferences/search", response_model=list[MetricSearchResult])
-async def search_metrics_for_units(
-    q: str = Query(default="", description="Search query for metric name"),
+@router.get("/me/units", response_model=UnitsOverview)
+async def get_units_overview(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
-    """Fuzzy search metric definitions and return their available units with current preference."""
-    # Get all definitions that have unit conversions (i.e., units to choose from)
-    result = await db.execute(select(MetricDefinition).order_by(MetricDefinition.name))
-    all_defs = result.scalars().all()
+    """Every metric definition with the unit the current user will actually see.
 
-    # Get user's current preferences
+    Resolution order per metric: an explicit user_unit_preferences row, then the
+    user's global measurement system, then the definition's canonical unit.
+    """
+    result = await db.execute(select(MetricDefinition).order_by(MetricDefinition.name))
+    definitions = result.scalars().all()
+
     pref_result = await db.execute(
         select(UserUnitPreference).where(UserUnitPreference.user_id == current_user.id)
     )
     user_prefs = {p.metric_definition_id: p.preferred_unit for p in pref_result.scalars().all()}
 
-    # Build results with fuzzy matching
-    query_lower = q.strip().lower()
-    scored: list[tuple[float, MetricDefinition]] = []
-
-    for d in all_defs:
-        units = _available_units(d)
-        if len(units) < 2:
-            continue  # Skip metrics with only one unit — nothing to choose
-
-        name_lower = d.name.lower()
-        # Also match against aliases
-        aliases: list[str] = []
-        if d.aliases:
-            try:
-                parsed = json.loads(d.aliases)
-                if isinstance(parsed, list):
-                    aliases = [a.lower() for a in parsed if isinstance(a, str)]
-            except (json.JSONDecodeError, TypeError):
-                pass
-
-        if not query_lower:
-            scored.append((1.0, d))
-            continue
-
-        # Exact or substring match
-        if query_lower in name_lower:
-            scored.append((1.0, d))
-            continue
-        if any(query_lower in a for a in aliases):
-            scored.append((0.95, d))
-            continue
-
-        # Fuzzy match on name
-        best = SequenceMatcher(None, query_lower, name_lower).ratio()
-        for alias in aliases:
-            best = max(best, SequenceMatcher(None, query_lower, alias).ratio())
-
-        if best >= 0.5:
-            scored.append((best, d))
-
-    scored.sort(key=lambda x: x[0], reverse=True)
-
-    return [
-        MetricSearchResult(
-            id=d.id,
-            name=d.name,
-            category=d.category,
-            canonical_unit=d.unit,
-            available_units=_available_units(d),
-            preferred_unit=user_prefs.get(d.id),
+    metrics: list[MetricUnitView] = []
+    for d in definitions:
+        conversions = parse_conversions(d.unit_conversions)
+        preferred = user_prefs.get(d.id)
+        metrics.append(
+            MetricUnitView(
+                id=d.id,
+                name=d.name,
+                category=d.category,
+                canonical_unit=d.unit,
+                available_units=_available_units(d),
+                aliases=_aliases(d),
+                unit_conversions=conversions,
+                preferred_unit=preferred,
+                system_unit=system_unit_for(d.unit, conversions, current_user.unit_system),
+                effective_unit=effective_unit(
+                    d.unit, conversions, preferred, current_user.unit_system
+                ),
+            )
         )
-        for _, d in scored[:20]
-    ]
+
+    return UnitsOverview(unit_system=current_user.unit_system, metrics=metrics)
+
+
+@router.put("/me/unit-system")
+async def set_unit_system(
+    body: UnitSystemSet,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Set the global measurement system. Send null to use per-metric units only.
+
+    Per-metric preferences are left untouched and still take precedence.
+    """
+    current_user.unit_system = body.unit_system
+    db.add(current_user)
+    await db.commit()
+    return {"message": "Measurement system updated", "unit_system": body.unit_system}
 
 
 # ── Dashboard metric selection ────────────────────────────────────────────────

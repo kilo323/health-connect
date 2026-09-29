@@ -256,6 +256,36 @@ async def init_db():
                 )
         except Exception:
             pass  # Never let seeding block startup
+        # Fill in unit_conversions entries that are declared but null, and any
+        # unit the sync actually stores but the map cannot convert (e.g. Distance
+        # is stored in meters while its map only had km/miles). Idempotent:
+        # existing numeric factors are never overwritten, so admin edits survive.
+        # See app/services/unit_systems.py.
+        try:
+            import json
+
+            from app.services.unit_systems import seed_missing_factors, stored_units
+
+            _raw_units = stored_units()
+            _rows = (await conn.execute(text(
+                "SELECT id, unit, unit_conversions FROM metric_definitions"))).all()
+            for _mid, _unit, _json in _rows:
+                try:
+                    _conv = json.loads(_json) if _json else {}
+                except (json.JSONDecodeError, TypeError):
+                    _conv = {}
+                if not isinstance(_conv, dict):
+                    _conv = {}
+                _fixes = seed_missing_factors(_unit, _conv, _raw_units)
+                if not _fixes:
+                    continue
+                _conv.update(_fixes)
+                await conn.execute(
+                    text("UPDATE metric_definitions SET unit_conversions = :c WHERE id = :i"),
+                    {"c": json.dumps(_conv), "i": _mid},
+                )
+        except Exception:
+            pass  # Never let seeding block startup
         # Create user_unit_preferences table (created by create_all if new, but ensure for existing DBs)
         try:
             await conn.execute(text("""
@@ -273,5 +303,12 @@ async def init_db():
         # Add dashboard_metrics column to users
         try:
             await conn.execute(text("ALTER TABLE users ADD COLUMN dashboard_metrics TEXT"))
+        except Exception:
+            pass  # Column already exists
+        # Add unit_system column to users: the global measurement system
+        # ("metric" | "imperial") applied to every metric that is not pinned by
+        # a user_unit_preferences row. See app/services/unit_systems.py.
+        try:
+            await conn.execute(text("ALTER TABLE users ADD COLUMN unit_system VARCHAR(20)"))
         except Exception:
             pass  # Column already exists
