@@ -9,6 +9,15 @@ services:
       - "${BACKEND_PORT:-8000}:${BACKEND_PORT:-8000}"
     volumes:
       - ./data:/app/data
+    # Probes the FastAPI root route (app/main.py) on the backend port, which is
+    # unauthenticated and touches no database. Not the frontend port: nginx
+    # falls back to the static index.html, so that only proves nginx is up.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:${BACKEND_PORT:-8000}/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     environment:
       - BACKEND_PORT=${BACKEND_PORT:-8000}
       - FRONTEND_PORT=${FRONTEND_PORT:-3000}

@@ -17,6 +17,15 @@ services:
       - frontend_node_modules:/app/frontend/node_modules
       # Persist Next.js cache for faster rebuilds
       - frontend_next:/app/frontend/.next
+    # Probes the FastAPI root route (app/main.py) on the backend port, which is
+    # unauthenticated and touches no database. Not the frontend port: Next.js
+    # serves its own shell, so that only proves the dev server is up.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:${BACKEND_PORT:-8000}/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
     environment:
       - BACKEND_PORT=${BACKEND_PORT:-8000}
       - FRONTEND_PORT=${FRONTEND_PORT:-3000}
