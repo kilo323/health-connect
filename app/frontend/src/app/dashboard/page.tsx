@@ -235,6 +235,15 @@ function DetailChart({
   const displayUnit = convertedSeries[0]?.unit || summary?.unit || '';
 
   const { low, high } = definition ? getDefaultRange(definition) : { low: null, high: null };
+  const displayLow = low == null ? null : convert(name, low, definition?.unit ?? '').value;
+  const displayHigh = high == null ? null : convert(name, high, definition?.unit ?? '').value;
+  // Only draw the band when the range can be expressed in the unit the series is
+  // actually plotted in. convert() falls back to the source unit when the pair
+  // isn't convertible, and a band in a different unit than the data is worse
+  // than no band.
+  const rangeMatchesUnits =
+    (low == null || convert(name, low, definition?.unit ?? '').unit === displayUnit) &&
+    (high == null || convert(name, high, definition?.unit ?? '').unit === displayUnit);
   const values = convertedSeries.map((p) => p.value);
   const min = Math.min(...values);
   const max = Math.max(...values);
@@ -294,16 +303,16 @@ function DetailChart({
               );
             }}
           />
-          {low != null && (
-            <ReferenceLine y={low} stroke="#ef4444" strokeDasharray="6 4" strokeWidth={1}
-              label={{ value: `Low: ${low}`, position: 'left', fontSize: 10, fill: '#ef4444' }} />
+          {rangeMatchesUnits && low != null && (
+            <ReferenceLine y={displayLow!} stroke="#ef4444" strokeDasharray="6 4" strokeWidth={1}
+              label={{ value: `Low: ${displayLow}`, position: 'left', fontSize: 10, fill: '#ef4444' }} />
           )}
-          {high != null && (
-            <ReferenceLine y={high} stroke="#ef4444" strokeDasharray="6 4" strokeWidth={1}
-              label={{ value: `High: ${high}`, position: 'left', fontSize: 10, fill: '#ef4444' }} />
+          {rangeMatchesUnits && high != null && (
+            <ReferenceLine y={displayHigh!} stroke="#ef4444" strokeDasharray="6 4" strokeWidth={1}
+              label={{ value: `High: ${displayHigh}`, position: 'left', fontSize: 10, fill: '#ef4444' }} />
           )}
-          {low != null && high != null && (
-            <ReferenceArea y1={low} y2={high} fill="#10b981" fillOpacity={0.06} />
+          {rangeMatchesUnits && displayLow != null && displayHigh != null && (
+            <ReferenceArea y1={displayLow} y2={displayHigh} fill="#10b981" fillOpacity={0.06} />
           )}
           <Line type="monotone" dataKey="value" stroke="#3b82f6" strokeWidth={2}
             dot={{ fill: '#3b82f6', r: 3 }} activeDot={{ r: 5, fill: '#2563eb' }} />
@@ -670,9 +679,21 @@ export default function DashboardPage() {
       const displayMax = summary.aggregation === 'avg_minmax' && summary.latest_max != null
         ? convert(config.name, summary.latest_max, summary.unit).value : null;
 
+      // Reference ranges are stored in the definition's canonical unit, so they
+      // have to be converted before being compared with, or labelled against, a
+      // value shown in the user's unit. convert() hands back the source unit
+      // when the pair isn't convertible (temperature needs an offset, not a
+      // factor), which means the range and the value are in different units —
+      // drop the range rather than compare across them.
+      const inDisplayUnit = (bound: number | null): number | null => {
+        if (bound == null || !def?.unit) return bound;
+        const r = convert(config.name, bound, def.unit);
+        return r.unit === converted.unit ? r.value : null;
+      };
+
       groups[config.category].push({
         config, definition: def, summary,
-        trendData: convertedTrendData, refLow: low, refHigh: high,
+        trendData: convertedTrendData, refLow: inDisplayUnit(low), refHigh: inDisplayUnit(high),
         displayValue: converted.value, displayUnit: converted.unit,
         formattedDisplay: formatMetricDisplay(converted.value, converted.unit),
         displayMin, displayMax,

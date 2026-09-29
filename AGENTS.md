@@ -202,14 +202,28 @@ reads the flag. Don't add behaviour on top of it.
   **unit name** (mass/length/temperature), never from the metric name. A unit only switches
   if `metric_definitions.unit_conversions` actually has a **numeric** factor for it.
 - `init_db()` backfills `unit_conversions` on every startup (see `seed_missing_factors`): a
-  declared-but-null factor gets its exact physical value, and a unit the sync actually
-  stores (derived from `scheduler.UNIT_MAP`) is added when the map cannot convert it. Factors
-  are derived from one base-per-dimension table, so they cannot drift apart. **Existing
-  numeric factors are never overwritten** — that is the escape hatch for a definition whose
-  conversion genuinely differs, so change it in Admin → Metric Definitions.
+  declared-but-null factor gets its exact physical value, a unit the sync actually stores is
+  added when the map cannot convert it, and a stored factor is **corrected** when it is
+  materially wrong for a standard pair (tolerance 0.01%, so a deliberately rounded value like
+  Distance's `miles: 0.621371` is left alone). A pair with no exact physical value — anything
+  `default_factor()` returns None for, e.g. Blood Glucose's `mg/dL` — is never touched, so a
+  non-standard conversion in Admin → Metric Definitions always survives.
+- **Temperature is affine.** °F = °C × 9/5 + 32, so scaling alone is off by a constant
+  32 — 35.95 °C would render as 64.7 °F. The conversion model therefore carries two terms:
+  `alternate = canonical * factor + offset(canonical, alternate)`, in the direction
+  `unit_conversions` is written. The offset is 0 for every pure ratio and comes from
+  `default_offset()` in `app/services/unit_systems.py` / `conversionOffset()` in
+  `app/frontend/src/lib/units.ts`; both pivot through Kelvin, so the two tables are
+  `(scale, zero)` pairs. Only the factor is stored in the database — the offset is a
+  physical constant, not per-definition data. The admin UI labels an affine pair
+  explicitly so nobody "fixes" the factor.
 - The factor direction is **alternates per one canonical unit** (`1 kg = factor × lb`), because
   both the frontend `convert()` and the admin UI read it that way. 1 kg = 2.20462 lb, not
   0.453592.
+- `convert()` returns the **source** unit when a pair is not convertible, so any code comparing
+  a converted value against a reference range must check that the returned unit matches the
+  unit it is about to display, and drop the range when it does not. Ranges live in the
+  definition's canonical unit and must be converted before being labelled or compared.
 
 ### Scripts boundary
 

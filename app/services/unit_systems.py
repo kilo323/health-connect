@@ -140,41 +140,84 @@ def unit_class(unit: str | None) -> str | None:
     return _UNIT_CLASS.get(normalize_unit(unit))
 
 
-# How many base units (kg / m / °C) one of these units is worth. Exact values,
-# used to derive every factor so the table cannot drift out of consistency.
-_TO_BASE: dict[str, float] = {
-    "kilograms": 1.0,
-    "grams": 1e-3,
-    "milligrams": 1e-6,
-    "pounds": 0.45359237,
-    "ounces": 0.028349523125,
-    "meters": 1.0,
-    "kilometers": 1e3,
-    "centimeters": 1e-2,
-    "millimeters": 1e-3,
-    "miles": 1609.344,
-    "feet": 0.3048,
-    "inches": 0.0254,
-    "yards": 0.9144,
-    "celsius": 1.0,
-    "fahrenheit": 1.0 / 1.8,
+# Per unit, (scale, offset) describing how it relates to its dimension's base
+# unit:  <base> = value * scale + offset. The base is kg for mass, m for length
+# and **K for temperature**. Mass and length have a zero offset because they
+# are pure ratios; temperature does not, which is the whole reason a °F/°C
+# conversion needs an additive term as well as a factor.
+_TO_BASE: dict[str, tuple[float, float]] = {
+    "kilograms": (1.0, 0.0),
+    "grams": (1e-3, 0.0),
+    "milligrams": (1e-6, 0.0),
+    "pounds": (0.45359237, 0.0),
+    "ounces": (0.028349523125, 0.0),
+    "meters": (1.0, 0.0),
+    "kilometers": (1e3, 0.0),
+    "centimeters": (1e-2, 0.0),
+    "millimeters": (1e-3, 0.0),
+    "miles": (1609.344, 0.0),
+    "feet": (0.3048, 0.0),
+    "inches": (0.0254, 0.0),
+    "yards": (0.9144, 0.0),
+    # 0 °C = 273.15 K; 0 °F = 459.67 °R = 255.372… K
+    "celsius": (1.0, 273.15),
+    "fahrenheit": (5.0 / 9.0, 459.67 * 5.0 / 9.0),
 }
+
+
+def _base_params(unit: str | None) -> tuple[float, float] | None:
+    return _TO_BASE.get(normalize_unit(unit))
+
+
+def is_affine(unit: str | None) -> bool:
+    """Whether converting this unit needs an additive term as well as a factor.
+
+    Only temperature. °F = °C × 9/5 + 32, so scaling alone is off by a constant
+    32 — treating a °C/°F pair as a bare ratio renders 35.95 °C as 64.7 °F
+    instead of 96.7 °F. Callers must apply :func:`default_offset` alongside the
+    factor for these units.
+    """
+    params = _base_params(unit)
+    return params is not None and params[1] != 0.0
+
+
+def _ratio(canonical_unit: str, alternate_unit: str) -> float | None:
+    """The bare ratio between two units of the same dimension, or None."""
+    canonical = _base_params(canonical_unit)
+    alternate = _base_params(alternate_unit)
+    if canonical is None or alternate is None:
+        return None
+    if unit_class(canonical_unit) != unit_class(alternate_unit):
+        return None
+    return canonical[0] / alternate[0]
 
 
 def default_factor(canonical_unit: str, alternate_unit: str) -> float | None:
     """The factor for `1 canonical_unit = factor * alternate_unit`, or None.
 
-    None when the two units are of different or unknown dimensions. Note this
-    is the *alternates per canonical* direction, matching what
-    ``unit_conversions`` stores.
+    None when the two units are of different or unknown dimensions. Note this is
+    the *alternates per canonical* direction, which is what ``unit_conversions``
+    stores and what the admin UI renders as `unit × factor = 1 canonical`. For
+    temperature this is only part of the story — pair it with
+    :func:`default_offset`.
     """
-    canonical = normalize_unit(canonical_unit)
-    alternate = normalize_unit(alternate_unit)
-    if canonical not in _TO_BASE or alternate not in _TO_BASE:
+    return _ratio(canonical_unit, alternate_unit)
+
+
+def default_offset(canonical_unit: str, alternate_unit: str) -> float | None:
+    """The additive term for `alternate_value = canonical_value * factor + offset`.
+
+    Zero for every pure ratio (mass, length). For temperature it carries the
+    part a factor cannot: canonical °F → °C needs -17.777…, canonical °C → °F
+    needs +32. None when the pair is not a known standard pair.
+    """
+    canonical = _base_params(canonical_unit)
+    alternate = _base_params(alternate_unit)
+    if canonical is None or alternate is None:
         return None
-    if unit_class(canonical) != unit_class(alternate):
+    if unit_class(canonical_unit) != unit_class(alternate_unit):
         return None
-    return _TO_BASE[canonical] / _TO_BASE[alternate]
+    return (canonical[1] - alternate[1]) / alternate[0]
 
 
 def stored_units() -> set[str]:
@@ -193,47 +236,67 @@ def seed_missing_factors(
     canonical_unit: str | None,
     conversions: dict,
     stored: set[str] | None = None,
-) -> dict[str, float]:
-    """Conversion factors to add to a definition's `unit_conversions` map.
+) -> dict[str, float | None]:
+    """Conversion factors to repair or add in a definition's `unit_conversions`.
 
-    Two kinds of entry are produced, both keyed by the exact unit string to
-    write:
+    Keyed by the exact unit string to write. A value of ``None`` writes a JSON
+    null, meaning "declared but not convertible".
 
-    * a unit that is already a key in the map but whose value is null or
-      non-numeric — it is declared but cannot convert;
-    * a unit the sync actually stores, when no numeric factor covers it (the
-      key is absent, or declared null).
+    * **Added** — a unit the sync actually stores that no numeric factor covers.
+    * **Filled** — a declared key whose value is null or non-numeric.
+    * **Corrected** — a stored factor that is materially wrong for a standard
+      unit pair (e.g. Weight's ``lb: 0.453592``, the reciprocal of the real
+      2.20462). Only when the pair has an exact physical value, so a genuinely
+      non-standard conversion in ``unit_conversions`` is never rewritten.
+      Factors that merely round the exact value (Distance's ``miles:
+      0.621371``) are left alone.
 
-    Existing numeric factors are never returned, so an admin-supplied value is
-    never overwritten and this stays safe to run on every startup.
+    Only the factor is stored. The additive term a temperature pair also needs
+    comes from :func:`default_offset`, which is a physical constant rather than
+    per-definition data.
     """
     if not canonical_unit or unit_class(canonical_unit) is None:
         return {}
 
-    known = {normalize_unit(unit): unit for unit in conversions}
     canonical = normalize_unit(canonical_unit)
-    fixes: dict[str, float] = {}
-
-    def _has_numeric_factor(unit: str) -> bool:
-        return unit in known and _numeric_factors(conversions).get(unit) is not None
+    numeric = _numeric_factors(conversions)
+    fixes: dict[str, float | None] = {}
 
     for key, value in conversions.items():
+        current = numeric.get(normalize_unit(key))
+        exact = default_factor(canonical_unit, key)
+        if exact is None:
+            # Not a standard pair: never touch an admin-supplied conversion.
+            continue
         if isinstance(value, bool) or not isinstance(value, (int, float)):
-            factor = default_factor(canonical_unit, key)
-            if factor is not None:
-                fixes[key] = factor
+            fixes[key] = exact
+            continue
+        if _matches(current, exact):
+            continue  # Already correct (possibly rounded) — leave it alone.
+        fixes[key] = exact
 
     for raw in sorted(stored or ()):
         normalized = normalize_unit(raw)
         if normalized == canonical or unit_class(raw) != unit_class(canonical_unit):
             continue
-        if _has_numeric_factor(raw):
-            continue
+        if normalized in numeric:
+            continue  # Covered above (correct, or about to be corrected)
         factor = default_factor(canonical_unit, raw)
         if factor is not None:
             fixes[raw] = factor
 
-    return fixes
+    return {unit: value for unit, value in fixes.items() if conversions.get(unit) != value}
+
+
+def _matches(current: float | None, exact: float) -> bool:
+    """Whether a stored factor already agrees with the exact value.
+
+    Tolerant of rounding: a value within 0.01% counts as correct so a
+    deliberately shortened factor is not rewritten every startup.
+    """
+    if current is None or exact == 0:
+        return False
+    return abs(current - exact) <= abs(exact) * 1e-4
 
 
 def parse_conversions(unit_conversions: str | dict | None) -> dict[str, float | None]:

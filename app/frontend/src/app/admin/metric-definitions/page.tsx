@@ -4,6 +4,12 @@ import { useState, useEffect } from 'react';
 import AuthLayout from '@/components/AuthLayout';
 import { TestTube2, Plus, Edit3, Trash2, AlertTriangle, RefreshCw, Link2, Save, X, ChevronDown, ChevronUp, Sparkles, CheckCircle, Merge, ArrowRight } from 'lucide-react';
 import apiClient from '@/lib/api-client';
+import { conversionOffset, isAffineUnit } from '@/lib/units';
+
+/** Trim a factor for display without floating-point noise. */
+function formatFactor(n: number): string {
+  return Number.isInteger(n) ? String(n) : String(Number(n.toFixed(6)));
+}
 
 interface ReferenceRange {
   sex?: string | null;
@@ -608,14 +614,30 @@ export default function AdminMetricDefinitionsPage() {
               </div>
               <button onClick={addUnitConversion} className="text-sm text-blue-600 hover:text-blue-800 px-3 py-1">Add</button>
             </div>
-            {Object.entries(form.unit_conversions || {}).map(([unit, factor]) => (
-              <div key={unit} className="flex items-center gap-2 text-sm text-gray-700 bg-gray-50 rounded px-3 py-1.5 mb-1">
-                <span>{unit} × {factor} = 1 {form.unit}</span>
-                <button onClick={() => removeUnitConversion(unit)} className="ml-auto text-red-500 hover:text-red-700">
-                  <X className="h-3 w-3" />
-                </button>
-              </div>
-            ))}
+            {Object.entries(form.unit_conversions || {}).map(([unit, factor]) => {
+              const canonical = form.unit ?? '';
+              const offset = conversionOffset(canonical, unit);
+              const affine = isAffineUnit(unit) || isAffineUnit(canonical);
+              return (
+                <div key={unit} className="flex items-center gap-2 text-sm text-gray-700 bg-gray-50 rounded px-3 py-1.5 mb-1">
+                  {affine ? (
+                    <span>
+                      {unit} = {formatFactor(factor)} × {canonical}
+                      {offset !== 0 &&
+                        ` ${offset > 0 ? '+' : '−'} ${formatFactor(Math.abs(offset))}`}
+                      <span className="ml-2 text-xs text-gray-500">
+                        (temperature is affine, not a plain ratio)
+                      </span>
+                    </span>
+                  ) : (
+                    <span>{unit} × {factor} = 1 {canonical}</span>
+                  )}
+                  <button onClick={() => removeUnitConversion(unit)} className="ml-auto text-red-500 hover:text-red-700">
+                    <X className="h-3 w-3" />
+                  </button>
+                </div>
+              );
+            })}
           </div>
 
           <div className="flex items-center gap-2">

@@ -7,6 +7,7 @@ import asyncio
 import json
 import os
 import shutil
+import sqlite3
 import sys
 import tempfile
 
@@ -17,16 +18,34 @@ os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{DB_PATH.replace(os.sep, '/')
 
 sys.path.insert(0, os.getcwd())
 
-from sqlalchemy import text  # noqa: E402
+from app.database import engine, init_db  # noqa: E402
 
-from app.database import async_session_factory, engine, init_db  # noqa: E402
+DEG = "\u00b0"
+# 1 canonical = factor * alternate, i.e. what the admin UI shows as
+# `unit × factor = 1 canonical`.
+EXPECTED = {
+    ("Weight", "lb"): 1.0 / 0.45359237,
+    ("Weight", "g"): 1000.0,
+    ("Distance", "meters"): 1000.0,
+    # Temperature needs the factor AND the offset the read path adds, so the
+    # factor is seeded like any other ratio.
+    ("Body Temperature", DEG + "C"): (5.0 / 9.0),
+}
+UNTOUCHED = {
+    ("Distance", "km"): 1,
+    ("Distance", "miles"): 0.621371,  # rounded on purpose — must be preserved
+    ("Sleep", "hours"): 1,
+    ("Sleep", "minutes"): 60,
+    ("Calories", "kJ"): 4.184,
+    ("Body Fat Percentage", "fraction"): 0.01,
+}
 
 
 def snapshot():
-    conn = __import__("sqlite3").connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH)
     rows = {
-        r[0]: (r[1], r[2])
-        for r in conn.execute("SELECT name, unit, unit_conversions FROM metric_definitions")
+        r[0]: json.loads(r[1]) if r[1] else {}
+        for r in conn.execute("SELECT name, unit_conversions FROM metric_definitions")
     }
     conn.close()
     return rows
@@ -34,44 +53,58 @@ def snapshot():
 
 async def main() -> None:
     before = snapshot()
-    print("--- BEFORE (only rows the seeder may touch)")
-    for name in ("Body Temperature", "Distance", "Weight", "Sleep", "Calories", "Body Fat Percentage"):
-        unit, conv = before[name]
-        print(f"  {name:24s} {unit!r:10s} {conv}")
 
     await init_db()
-    after_first = snapshot()
+    after = snapshot()
 
-    print("\n--- AFTER first init_db()")
-    for name in ("Body Temperature", "Distance", "Weight", "Sleep", "Calories", "Body Fat Percentage"):
-        unit, conv = after_first[name]
-        marker = "  <-- changed" if conv != before[name][1] else ""
-        print(f"  {name:24s} {unit!r:10s} {conv}{marker}")
+    print("--- AFTER init_db()")
+    for name in ("Body Temperature", "Distance", "Weight", "Sleep", "Calories"):
+        changed = "  <-- changed" if after[name] != before.get(name) else ""
+        print(f"  {name:22s} {json.dumps(after[name], ensure_ascii=False)}{changed}")
 
-    # Idempotence: a second startup must not touch anything.
     await init_db()
-    after_second = snapshot()
-    drift = {n for n in after_first if after_first[n] != after_second[n]}
+    drift = {n for n in after if after[n] != snapshot()[n]}
     print(f"\nsecond init_db() drift: {sorted(drift) or 'none'}")
+    assert not drift, drift
 
-    # The values it wrote must be the exact physical constants.
-    checks = {
-        ("Body Temperature", "°C"): 1.0 / 1.8,
-        ("Distance", "meters"): 1000.0,
-    }
-    for (name, unit), expected in checks.items():
-        got = json.loads(after_first[name][1]).get(unit)
-        ok = got is not None and abs(got - expected) < 1e-9
-        print(f"  {'OK ' if ok else 'BAD'} {name}.{unit} = {got!r} (expected {expected})")
-        assert ok
+    for (name, unit), expected in EXPECTED.items():
+        got = after[name].get(unit)
+        ok = got == expected
+        print(f"  {'OK ' if ok else 'BAD'} {name}.{unit} = {got!r} (expected {expected!r})")
+        assert ok, (name, unit, got, expected)
 
-    # Round-trip through the hook's own direction: value * factor. The stored
-    # miles factor is pre-existing and rounded, so compare loosely.
-    dist_km = 2.406
-    miles = json.loads(after_first["Distance"][1])["miles"]
-    exact = dist_km / 1.609344
-    print(f"\n  {dist_km} km -> {dist_km * miles:.4f} miles (exact {exact:.4f})")
-    assert abs(dist_km * miles - exact) < 1e-3
+    for (name, unit), expected in UNTOUCHED.items():
+        got = after[name].get(unit)
+        ok = got == expected
+        print(f"  {'OK ' if ok else 'BAD'} {name}.{unit} = {got!r} untouched")
+        assert ok, (name, unit, got, expected)
+
+    # The headline bug: 95.9 kg must be 211.5 lb, not 43.5.
+    lb = after["Weight"]["lb"]
+    weight_kg = 95.949
+    print(f"\n  {weight_kg} kg -> {weight_kg * lb:.1f} lb (expect ~211.5)")
+    assert abs(weight_kg * lb - 211.5) < 0.1
+
+    # km -> miles must agree with the exact definition of a mile.
+    miles = after["Distance"]["miles"]
+    print(f"  2.406 km -> {2.406 * miles:.4f} miles (exact {2.406 / 1.609344:.4f})")
+    assert abs(2.406 * miles - 2.406 / 1.609344) < 1e-3
+
+    # Temperature is affine: the factor alone would give 64.7 °F, the offset
+    # has to bring it to 96.7 °F.
+    from app.services.unit_systems import default_factor, default_offset
+
+    canonical, alternate = DEG + "F", DEG + "C"
+    factor = after["Body Temperature"][alternate]
+    offset = default_offset(canonical, alternate)
+    stored_celsius = 35.949954986572266
+    fahrenheit = (stored_celsius - offset) / factor
+    print(
+        f"  {stored_celsius:.2f} C -> {fahrenheit:.2f} F "
+        f"(factor only would give {stored_celsius / factor:.1f})"
+    )
+    assert abs(fahrenheit - 96.7099) < 1e-3
+    assert abs(factor - default_factor(canonical, alternate)) < 1e-12
 
     await engine.dispose()
     shutil.rmtree(TMP, ignore_errors=True)
