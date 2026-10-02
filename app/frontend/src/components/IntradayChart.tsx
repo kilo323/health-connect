@@ -32,14 +32,20 @@ export interface IntradayOption {
   unit: string;
   /** Most recent raw sample for this metric, used to open on a day with data. */
   last_at?: string | null;
-  /** Earliest raw/hourly row, used to bound the date picker. */
+  /** Earliest raw/hourly row, used to bound the date picker and the all-time window. */
   first_at?: string | null;
 }
 
 interface Props {
   options: IntradayOption[];
-  /** Days of intraday detail to request for the selected day. */
+  /** Number of slices to request for the selected day. */
   maxPoints?: number;
+  /**
+   * When set, the chart spans the trailing `days` (0 = all available data)
+   * instead of a single picked day, and the date picker is hidden. The
+   * dashboard passes its own period selector here so both stay in sync.
+   */
+  days?: number;
 }
 
 function dayBounds(dateStr: string): { start: string; end: string } {
@@ -54,6 +60,26 @@ function todayUtc(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
+/** Trailing window ending now; `days === 0` starts at the earliest data. */
+function rangeBounds(days: number, options: IntradayOption[]): { start: string; end: string } {
+  const end = new Date();
+  let start: Date;
+  if (days > 0) {
+    start = new Date(end.getTime() - days * 24 * 60 * 60 * 1000);
+  } else {
+    // `first_at` comes back as a naive ISO string (UTC); pin the offset so
+    // local-timezone parsing doesn't shift the window by a day.
+    const firsts = options
+      .map((o) => o.first_at)
+      .filter((v): v is string => Boolean(v))
+      .map((v) => new Date(v.includes('Z') || v.includes('+') ? v : `${v}Z`).getTime());
+    start = firsts.length
+      ? new Date(Math.min(...firsts))
+      : new Date(end.getTime() - 30 * 24 * 60 * 60 * 1000);
+  }
+  return { start: start.toISOString(), end: end.toISOString() };
+}
+
 /** Prefer heart rate as the opening view; it is the densest intraday series. */
 function preferredDefault(options: IntradayOption[]): string {
   const hr = options.find(
@@ -66,12 +92,15 @@ function preferredDefault(options: IntradayOption[]): string {
  * Intraday chart for metrics that sync raw samples (heart rate, active minutes).
  *
  * The daily endpoints collapse each metric to one value per day, so this calls
- * `/health/metrics/{type}/series`, which buckets the day into at most
- * `maxPoints` slices and returns min/max/avg per slice. Drawing the min-max
- * band plus the average line keeps the shape honest without shipping ~30k
- * samples per day to the browser.
+ * `/health/metrics/{type}/series`, which buckets the window into at most
+ * `maxPoints` slices and returns min/max/avg per slice. Without `days` the
+ * window is a single picked day; with `days` it is the trailing N days (0 =
+ * all available data), so the chart stays in sync with the dashboard's own
+ * period filter. Drawing the min-max band plus the average line keeps the
+ * shape honest without shipping ~30k samples per day to the browser.
  */
-export default function IntradayChart({ options, maxPoints = 180 }: Props) {
+export default function IntradayChart({ options, maxPoints = 180, days }: Props) {
+  const rangeMode = days !== undefined;
   const [metricType, setMetricType] = useState<string>('');
   const [date, setDate] = useState<string>(todayUtc());
   const [showBand, setShowBand] = useState(true);
@@ -87,21 +116,37 @@ export default function IntradayChart({ options, maxPoints = 180 }: Props) {
     setMetricType((cur) =>
       options.some((o) => o.metric_type === cur) ? cur : next
     );
+    if (rangeMode) return;
     const last = options.find((o) => o.metric_type === next)?.last_at;
     if (last) setDate(last.slice(0, 10));
     // Intentionally only re-run when the option set itself changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [options]);
 
+  const window = useMemo(
+    () => (rangeMode ? rangeBounds(days!, options) : dayBounds(date)),
+    [rangeMode, days, options, date]
+  );
+
+  // A multi-day window gets more slices so the shape stays legible; the
+  // single-day mode keeps the default 180-slice density. 2000 is plenty for
+  // a 1200px-wide chart and keeps multi-year "All" payloads small.
+  const sliceCount = useMemo(
+    () =>
+      rangeMode
+        ? Math.min(2000, Math.max(300, (days! || 30) * 12))
+        : maxPoints,
+    [rangeMode, days, maxPoints]
+  );
+
   useEffect(() => {
     if (!metricType) return;
     let cancelled = false;
-    const { start, end } = dayBounds(date);
     setLoading(true);
     setError(null);
     apiClient
       .get<SeriesResponse>(`/health/metrics/${encodeURIComponent(metricType)}/series`, {
-        params: { start, end, max_points: maxPoints },
+        params: { start: window.start, end: window.end, max_points: sliceCount },
       })
       .then((res) => {
         if (!cancelled) setData(res.data);
@@ -122,22 +167,24 @@ export default function IntradayChart({ options, maxPoints = 180 }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [metricType, date, maxPoints]);
+  }, [metricType, window, sliceCount, rangeMode, days, maxPoints]);
 
   const chartData = useMemo(() => {
     if (!data?.points?.length) return [];
+    // Recharts needs a short label; keep the full ISO in a separate field.
+    // A multi-day window needs dates on the axis, not times of day.
+    const fmt = (t: string) =>
+      rangeMode
+        ? new Date(t).toLocaleDateString([], { month: 'short', day: 'numeric' })
+        : new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     return data.points.map((p) => ({
-      // Recharts needs a short label; keep the full ISO in a separate field.
-      time: new Date(p.t).toLocaleTimeString([], {
-        hour: '2-digit',
-        minute: '2-digit',
-      }),
+      time: fmt(p.t),
       min: p.min,
       max: p.max,
       avg: Number(p.avg.toFixed(2)),
       count: p.count,
     }));
-  }, [data]);
+  }, [data, rangeMode]);
 
   const unit = useMemo(() => {
     const fromOption = options.find((o) => o.metric_type === metricType)?.unit;
@@ -163,7 +210,15 @@ export default function IntradayChart({ options, maxPoints = 180 }: Props) {
     <div className="bg-white rounded-lg border border-gray-200 p-4 mb-6">
       <div className="flex items-center justify-between flex-wrap gap-3 mb-4">
         <div>
-          <h2 className="text-lg font-semibold text-gray-900">Intraday detail</h2>
+          <h2 className="text-lg font-semibold text-gray-900">
+            Intraday detail
+            {rangeMode && window && (
+              <span className="ml-2 text-xs font-normal text-gray-400">
+                {new Date(window.start).toLocaleDateString()} –{' '}
+                {new Date(window.end).toLocaleDateString()}
+              </span>
+            )}
+          </h2>
           <p className="text-xs text-gray-500">
             {data
               ? `${data.raw_row_count.toLocaleString()} raw samples${
@@ -185,15 +240,17 @@ export default function IntradayChart({ options, maxPoints = 180 }: Props) {
               </option>
             ))}
           </select>
-          <input
-            type="date"
-            value={date}
-            min={earliestUtc}
-            max={todayUtc()}
-            onChange={(e) => setDate(e.target.value)}
-            className="input-field w-auto"
-            aria-label="Date"
-          />
+          {!rangeMode && (
+            <input
+              type="date"
+              value={date}
+              min={earliestUtc}
+              max={todayUtc()}
+              onChange={(e) => setDate(e.target.value)}
+              className="input-field w-auto"
+              aria-label="Date"
+            />
+          )}
           <button
             onClick={() => setShowBand((v) => !v)}
             className="btn-secondary"
@@ -207,9 +264,11 @@ export default function IntradayChart({ options, maxPoints = 180 }: Props) {
       {error && <p className="text-sm text-red-600">{error}</p>}
       {!error && !loading && chartData.length === 0 && (
         <p className="text-sm text-gray-500">
-          No intraday data for this metric on {date}. Raw samples are only kept
-          for the configured retention window; older days fall back to hourly
-          rows and then daily rollups.
+          {rangeMode
+            ? 'No intraday data for this metric in the selected period. '
+            : `No intraday data for this metric on ${date}. `}
+          Raw samples are only kept for the configured retention window; older
+          days fall back to hourly rows and then daily rollups.
         </p>
       )}
 
@@ -241,7 +300,8 @@ export default function IntradayChart({ options, maxPoints = 180 }: Props) {
                   typeof value === 'number' ? value.toFixed(1) : String(value ?? ''),
                   String(name),
                 ]}
-                labelFormatter={(label) => `${date} ${label}`}
+                labelFormatter={(label) =>
+                  rangeMode ? label : `${date} ${label}`}
               />
               {showBand && (
                 <Area

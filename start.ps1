@@ -88,6 +88,11 @@ function Start-Backend {
 function Start-Frontend {
     Write-Host "`nStarting frontend on port $FrontendPort..." -ForegroundColor Cyan
     cd $FrontendDir
+    # next dev reads PORT (listen port) and BACKEND_PORT (the /api rewrite
+    # target) from its environment. Inject the same values the backend uses so
+    # one .env drives everything and no .env.local is needed.
+    $env:PORT = "$FrontendPort"
+    $env:BACKEND_PORT = "$BackendPort"
     npm run dev
 }
 
@@ -111,7 +116,9 @@ switch ($Service) {
         Stop-ServiceByPort -Port $FrontendPort -Name "Frontend"
         
         $backendCmd = "& '$venvActivate'; python -m uvicorn app.main:app --reload --host 0.0.0.0 --port $BackendPort"
-        $frontendCmd = "cd '$FrontendDir'; npm run dev"
+        # PORT = listen port, BACKEND_PORT = the dev /api rewrite target. Set on
+        # the spawned process so the fresh window doesn't inherit the caller env.
+        $frontendCmd = "cd '$FrontendDir'; `$env:PORT='$FrontendPort'; `$env:BACKEND_PORT='$BackendPort'; npm run dev"
         
         $backendProc = Start-Process powershell -ArgumentList "-NoExit", "-Command", $backendCmd -PassThru
         $frontendProc = Start-Process powershell -ArgumentList "-NoExit", "-Command", $frontendCmd -PassThru

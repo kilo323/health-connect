@@ -820,7 +820,10 @@ export default function DashboardPage() {
       {/* Intraday detail — hourly/minute view for metrics that keep raw or
           hourly samples (heart rate, steps, ...). Day-over-day metrics live in
           the cards below. */}
-      {intradayTypes.length > 0 && <IntradayChart options={intradayTypes} />}
+      {/* Shares the dashboard's period filter: the chart spans the same
+          trailing window as the report data, so there is no separate day
+          picker. */}
+      {intradayTypes.length > 0 && <IntradayChart options={intradayTypes} days={period} />}
 
       {/* Metric Categories */}
       {activeCategories.map((category) => {
