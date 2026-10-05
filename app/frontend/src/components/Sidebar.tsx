@@ -17,7 +17,8 @@ import {
   LinkIcon,
   BarChart3,
   TestTube2,
-  UserCircle
+  UserCircle,
+  Radar
 } from 'lucide-react';
 
 const navigation = [
@@ -36,6 +37,7 @@ const adminNavigation = [
   { name: 'LLM Config', href: '/admin/llm-config', icon: Bot },
   { name: 'Schedule', href: '/admin/schedule', icon: Database },
   { name: 'Sync Config', href: '/admin/sync-config', icon: Activity },
+  { name: 'Google Probe', href: '/admin/google-probe', icon: Radar },
   { name: 'Metric Definitions', href: '/admin/metric-definitions', icon: TestTube2 },
   { name: 'System Settings', href: '/admin/system-settings', icon: Settings },
 ];

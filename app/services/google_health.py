@@ -117,12 +117,27 @@ class GoogleHealthService:
         "height": "height",
         "heart_minutes": "active-zone-minutes",
         "move_minutes": "active-minutes",
+        # Added 2026-10-02: body composition / cardio-availability probe found
+        # these exist in v4 but were not synced.
+        "heart_rate_variability": "heart-rate-variability",
+        "oxygen_saturation_raw": "oxygen-saturation",
+        "vo2_max": "vo2-max",
+        "exercise": "exercise",
     }
 
     # Google Health API v4 data category per data type (determines time field/filter pattern).
     _INTERVAL_TYPES = {"steps", "distance", "active-zone-minutes", "active-minutes"}
-    _SAMPLE_TYPES = {"heart-rate", "weight", "blood-glucose", "core-body-temperature", "body-fat", "height"}
-    _SESSION_TYPES = {"sleep"}
+    _SAMPLE_TYPES = {
+        "heart-rate", "weight", "blood-glucose", "core-body-temperature",
+        "body-fat", "height",
+        # New sample types (verified live 2026-10-02: filter on
+        # <snake>.sample_time.physical_time, and none of these support dailyRollUp).
+        "heart-rate-variability", "oxygen-saturation", "vo2-max",
+    }
+    # Session types: reject the data-type-member time filter, so fetch
+    # unfiltered and trim client-side by interval.startTime. (sleep always;
+    # exercise rejects its interval filter, verified live 2026-10-02.)
+    _SESSION_TYPES = {"sleep", "exercise"}
     _DAILY_TYPES = {"daily-oxygen-saturation", "total-calories"}
 
     def _filter_snake(self, api_type: str) -> str:
@@ -389,3 +404,129 @@ class GoogleHealthService:
                 chunk_start = chunk_end
 
         return rollups
+
+    # Broad candidate list of v4 data-type slugs to scan when probing what the
+    # live account exposes. The 13 already synced (DATA_TYPE_MAP values) are
+    # positive controls. There is no GET dataTypes catalog endpoint, so each
+    # slug is checked individually and classified by the API's own error text.
+    PROBE_CANDIDATES = [
+        # already synced (controls)
+        "steps", "heart-rate", "sleep", "weight", "blood-glucose",
+        "core-body-temperature", "distance", "total-calories",
+        "daily-oxygen-saturation", "body-fat", "height",
+        "active-zone-minutes", "active-minutes",
+        # body composition
+        "body-fat-mass", "fat-mass", "lean-body-mass", "muscle-mass",
+        "skeletal-muscle-mass", "bone-mass", "body-water", "body-water-mass",
+        "visceral-fat", "basal-metabolic-rate", "metabolic-rate",
+        # activity / fitness
+        "calories-burned", "active-calories", "basal-calories",
+        "floors-climbed", "elevation-gained", "step-count", "cadence",
+        "stride-length", "speed", "power", "exercise", "workout",
+        "activity-recognition", "stand-hours", "wheelchair-pushes",
+        # vitals / cardio
+        "resting-heart-rate", "heart-rate-variability", "hrv",
+        "blood-pressure", "systolic-blood-pressure", "diastolic-blood-pressure",
+        "respiratory-rate", "vo2-max", "oxygen-saturation",
+        "skin-temperature", "body-temperature",
+        # sleep
+        "sleep-stages", "sleep-analysis", "snoring",
+        # nutrition / metabolic
+        "nutrition", "hydration", "water", "dietary-energy",
+        # reproductive / other
+        "menstruation", "menstrual-cycle", "ovulation", "cervical-mucus",
+        "uv-exposure", "mindful-minutes", "mindfulness",
+    ]
+
+    async def probe_data_types(self, user_id: int) -> Dict[str, Any]:
+        """Scan PROBE_CANDIDATES against the live Google Health API and report
+        which exist, which are already synced, and which are available-but-unsynced.
+
+        Read-only: issues GET dataPoints requests (pageSize=1) only. There is no
+        catalog endpoint, so a type is "missing" when the API answers
+        ``Invalid data type ID referenced in the parent data type collection`` —
+        any other result (200, or a filter/permission error) means the type
+        exists in the v4 catalog.
+        """
+        # Reuse the already-synced map so the probe always reflects current config.
+        synced = set(self.DATA_TYPE_MAP.values())
+
+        token = await self._get_valid_access_token(user_id, force_refresh=True)
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+        exists: list[Dict[str, Any]] = []
+        missing: list[str] = []
+        errored: list[Dict[str, str]] = []
+
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            for slug in self.PROBE_CANDIDATES:
+                url = f"{self.BASE_URL}/v4/users/me/dataTypes/{slug}/dataPoints"
+                try:
+                    response = await client.get(url, headers=headers, params={"pageSize": 1})
+                except httpx.HTTPError as exc:
+                    errored.append({"slug": slug, "error": str(exc)})
+                    continue
+
+                if response.status_code == 200:
+                    try:
+                        data_points = response.json().get("dataPoints", [])
+                    except ValueError:
+                        data_points = []
+                    first = data_points[0] if data_points else None
+                    exists.append({
+                        "slug": slug,
+                        "sampled": first is not None,
+                        "point_count": len(data_points),
+                        "synced": slug in synced,
+                        "internal_name": next((k for k, v in self.DATA_TYPE_MAP.items() if v == slug), None),
+                        "shape": self._data_point_shape(first),
+                    })
+                else:
+                    detail = self._error_message(response)
+                    if "Invalid data type ID referenced" in detail:
+                        missing.append(slug)
+                    else:
+                        # Exists, but the request itself failed (filter/perm/etc.).
+                        exists.append({
+                            "slug": slug, "sampled": False, "point_count": 0,
+                            "synced": slug in synced,
+                            "internal_name": next((k for k, v in self.DATA_TYPE_MAP.items() if v == slug), None),
+                            "shape": None,
+                            "note": f"HTTP {response.status_code}: {detail}",
+                        })
+
+        return {
+            "user_id": user_id,
+            "probed": len(self.PROBE_CANDIDATES),
+            "synced_slugs": sorted(synced),
+            "exists": sorted(exists, key=lambda e: (not e["synced"], e["slug"])),
+            "missing": sorted(missing),
+            "errored": errored,
+        }
+
+    @staticmethod
+    def _data_point_shape(point: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Summarize the value-bearing fields of a DataPoint so the probe UI can
+        show *what* a type returns (e.g. bodyFat -> {percentage})."""
+        if not point:
+            return None
+        # Find the payload key: the first dict value other than dataSource/metadata
+        # (the v4 DataPoint puts the type-specific union field here).
+        payload = None
+        for key, value in point.items():
+            if key in ("name", "dataSource", "metadata") or not isinstance(value, dict):
+                continue
+            payload = value
+            break
+        if not payload:
+            return None
+        # Keep scalar/value fields and the time field; drop nested noise.
+        fields: Dict[str, Any] = {}
+        for key, value in payload.items():
+            if key in ("sampleTime", "interval", "civilTime"):
+                continue
+            if isinstance(value, (str, int, float, bool)):
+                fields[key] = value
+            elif isinstance(value, list) and value and isinstance(value[0], (str, int, float, bool)):
+                fields[key] = value[:3]
+        return {"payload_fields": fields}

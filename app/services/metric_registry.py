@@ -54,14 +54,24 @@ DEFAULTS: dict[str, dict[str, str]] = {
     "Calories": {"aggregation": "sum", "cadence": "daily"},
     "Sleep": {"aggregation": "sum", "cadence": "daily"},
     "Oxygen Saturation": {"aggregation": "latest", "cadence": "daily"},
+    # Per-minute SpO2 samples (distinct from the daily "Oxygen Saturation").
+    "Oxygen Saturation (Raw)": {"aggregation": "avg", "cadence": "intraday"},
     "Weight": {"aggregation": "latest", "cadence": "daily"},
     "Body Fat Percentage": {"aggregation": "latest", "cadence": "daily"},
+    # HRV (RMSSD): intraday samples; the honest daily value is an average.
+    "Heart Rate Variability": {"aggregation": "avg", "cadence": "intraday"},
     # Derived heart-rate parts: each row is already an aggregate of that day.
     "Heart Rate (Average)": {"aggregation": "avg", "cadence": "intraday"},
     "Heart Rate (Minimum)": {"aggregation": "latest", "cadence": "intraday"},
     "Heart Rate (Maximum)": {"aggregation": "latest", "cadence": "intraday"},
     # ── event: sparse point-in-time tests ────────────────────────────────────
     "Body Temperature": {"aggregation": "latest", "cadence": "event"},
+    "VO2 Max": {"aggregation": "latest", "cadence": "event"},
+    # Workout sub-metrics (one row per workout session, at its start time).
+    "Workout Duration": {"aggregation": "latest", "cadence": "event"},
+    "Workout Calories": {"aggregation": "latest", "cadence": "event"},
+    "Workout Distance": {"aggregation": "latest", "cadence": "event"},
+    "Workout Avg Heart Rate": {"aggregation": "latest", "cadence": "event"},
 }
 
 # Lab/panel metrics from document analysis: meaningful on the date of the test.

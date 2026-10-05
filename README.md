@@ -13,10 +13,12 @@ units and reference ranges.
 
 ## Features
 
-- **Google Health sync** — 13 data types: steps, heart rate, sleep, weight, distance,
-  calories, blood glucose, body temperature, oxygen saturation, body-fat %, height,
-  active-zone minutes and active minutes. Incremental sync on a schedule, a
-  full-window **backfill**, and optional webhook push notifications.
+- **Google Health sync** — 17 data types: steps, heart rate, sleep, weight, distance,
+  calories, blood glucose, body temperature, oxygen saturation (daily + per-minute raw),
+  body-fat %, height, active-zone minutes, active minutes, heart-rate variability (HRV),
+  VO2 max, and workout sessions (duration, calories, distance, avg heart rate).
+  Incremental sync on a schedule, a full-window **backfill**, and optional webhook push
+  notifications.
 - **Data retention & compaction** — raw intraday samples are rolled up into an hourly
   tier, then daily aggregates, then pruned past a configurable retention window, so
   `health_metrics` stays bounded while intraday charts and long-term history both

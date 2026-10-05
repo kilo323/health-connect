@@ -1,9 +1,13 @@
+import logging
+
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy import event, text
 from sqlalchemy.pool import NullPool
 
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 # Use NullPool so connections are not kept open between requests. SQLite over a
 # Docker bind mount (especially on Windows) is prone to "database is locked"
@@ -240,6 +244,61 @@ async def init_db():
                     f"ALTER TABLE metric_definitions ADD COLUMN {_col} VARCHAR(20)"))
             except Exception:
                 pass  # Column already exists
+        # Seed definitions for Google data types added 2026-10-02 (HRV, raw SpO2,
+        # VO2 max, and workout sub-metrics). Without these, the normalizer's
+        # fuzzy pass would map labels like "Workout Distance" onto the existing
+        # "Distance" definition (and HRV/VO2-max would get no cadence). Exact
+        # name/alias matches win before fuzzy matching. Idempotent: only inserts
+        # names that are absent, so admin edits and manual additions survive.
+        try:
+            _new_defs = [
+                # (name, category, unit, data_type, description, aliases, agg, cadence)
+                ("Heart Rate Variability", "Vital Signs", "ms", "float",
+                 "HRV (RMSSD) synced from Google Health Connect.",
+                 ["heart_rate_variability", "hrv", "hrv rmssd"], "avg", "intraday"),
+                ("Oxygen Saturation (Raw)", "Vital Signs", "%", "float",
+                 "Per-minute SpO2 samples from Google Health Connect (distinct from the daily average).",
+                 ["oxygen_saturation_raw", "spo2 (raw)", "raw spo2"], "avg", "intraday"),
+                ("VO2 Max", "Fitness", "ml/kg/min", "float",
+                 "Cardiovascular fitness (VO2 max) from Google Health Connect.",
+                 ["vo2_max", "vo2max", "vo2 max", "maximal oxygen uptake", "cardio fitness score"],
+                 "latest", "event"),
+                ("Workout Duration", "Activity", "minutes", "float",
+                 "Duration of an individual workout session, from Google Health Connect.",
+                 ["workout duration", "exercise duration"], "latest", "event"),
+                ("Workout Calories", "Activity", "kcal", "float",
+                 "Calories burned during an individual workout session, from Google Health Connect.",
+                 ["workout calories", "exercise calories"], "latest", "event"),
+                ("Workout Distance", "Activity", "meters", "float",
+                 "Distance covered during an individual workout session, from Google Health Connect.",
+                 ["workout distance", "exercise distance"], "latest", "event"),
+                ("Workout Avg Heart Rate", "Activity", "bpm", "float",
+                 "Average heart rate during an individual workout session, from Google Health Connect.",
+                 ["workout avg heart rate", "exercise average heart rate"], "latest", "event"),
+            ]
+            _existing = {r[0] for r in (await conn.execute(
+                text("SELECT name FROM metric_definitions"))).all()}
+            import json as _json
+            for (_name, _cat, _unit, _dt, _desc, _aliases, _agg, _cad) in _new_defs:
+                if _name in _existing:
+                    continue
+                # Workout Distance: stored in meters (like Distance) but its
+                # canonical unit is meters too; expose miles for imperial users.
+                _conv = {"miles": 0.621371} if _name == "Workout Distance" else {}
+                await conn.execute(
+                    text("INSERT INTO metric_definitions "
+                         "(name, category, unit, data_type, description, aliases, "
+                         "reference_ranges, unit_conversions, aggregation, cadence) "
+                         "VALUES (:name, :cat, :unit, :dt, :desc, :aliases, '[]', :conv, :agg, :cadence)"),
+                    {"name": _name, "cat": _cat, "unit": _unit, "dt": _dt, "desc": _desc,
+                     "aliases": _json.dumps(_aliases), "conv": _json.dumps(_conv),
+                     "agg": _agg, "cadence": _cad},
+                )
+        except Exception:
+            # Log (don't raise): a seeding bug must not block startup, but it must
+            # be visible — a silent failure left the new Google metrics unlinked
+            # and let fuzzy matching misroute them.
+            logger.exception("Failed to seed new metric_definitions at startup")
         # Seed the new columns for rows that predate them (idempotent: NULLs only).
         try:
             from app.services.metric_registry import defaults_for

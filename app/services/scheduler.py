@@ -43,6 +43,10 @@ SYNC_DATA_TYPES = [
     "blood_glucose", "body_temperature",
     "oxygen_saturation", "body_fat_percentage", "height",
     "heart_minutes", "move_minutes", "calories",
+    # Added 2026-10-02 (verified available in Google Health API v4):
+    #   - HRV, raw SpO2, and VO2 max are sample types (no dailyRollUp).
+    #   - exercise is a session type (no rollup, client-side time filter).
+    "heart_rate_variability", "oxygen_saturation_raw", "vo2_max", "exercise",
 ]
 
 UNIT_MAP = {
@@ -59,6 +63,13 @@ UNIT_MAP = {
     "heart_minutes": "minutes",
     "move_minutes": "minutes",
     "calories": "kcal",
+    # New types. Each maps to the canonical unit of the definition it resolves
+    # to, so display conversion (user_unit_preferences) has a valid pair.
+    "heart_rate_variability": "ms",
+    "oxygen_saturation_raw": "%",
+    "vo2_max": "ml/kg/min",
+    # exercise is a session type: its sub-metrics each carry their own unit, so
+    # no single entry here (the extractor supplies per-row units for it).
 }
 
 # Metrics that only have a dailyRollUp endpoint in Google's API (no raw list
@@ -92,6 +103,10 @@ API_TYPE_TO_INTERNAL = {
     "height": "height",
     "active-zone-minutes": "heart_minutes",
     "active-minutes": "move_minutes",
+    "heart-rate-variability": "heart_rate_variability",
+    "oxygen-saturation": "oxygen_saturation_raw",
+    "vo2-max": "vo2_max",
+    "exercise": "exercise",
 }
 
 # ── Metric rollup configuration ──────────────────────────────────────────────
@@ -385,7 +400,7 @@ async def sync_health_data(
                     # written and committed before the next is extracted, so peak
                     # memory stays flat and partial progress is durable.
                     for slice_start in range(0, len(points), POINT_SLICE):
-                        window_rows: list[tuple[str, float, datetime]] = []
+                        window_rows: list[tuple[str, float, datetime, str | None]] = []
                         for point in points[slice_start:slice_start + POINT_SLICE]:
                             try:
                                 window_rows.extend(
@@ -400,9 +415,11 @@ async def sync_health_data(
                         # instead of once per row.
                         superseded: set[tuple[str, object]] = set()
 
-                        for metric_label, value, recorded_at in window_rows:
+                        for metric_label, value, recorded_at, row_unit in window_rows:
                             try:
-                                unit = UNIT_MAP.get(data_type, "unknown")
+                                # row_unit is set only for rows whose unit differs from
+                                # the data type's canonical unit (exercise sub-metrics).
+                                unit = row_unit if row_unit is not None else UNIT_MAP.get(data_type, "unknown")
                                 cache_key = (metric_label, unit)
                                 norm = norm_cache.get(cache_key)
                                 if norm is None:
@@ -623,26 +640,38 @@ class HealthSyncScheduler:
         return summary
 
     @staticmethod
-    def _extract_rows(data_type: str, point: dict, granularity: str) -> list[tuple[str, float, datetime]]:
-        """Return a list of (metric_label, value, recorded_at) rows for one point.
+    def _extract_rows(data_type: str, point: dict, granularity: str) -> list[tuple[str, float, datetime, str | None]]:
+        """Return a list of (metric_label, value, recorded_at, unit) rows for one point.
 
-        A single point can produce multiple rows (e.g. a heart-rate daily rollup
-        yields avg/min/max). `granularity` is "daily" (dailyRollUp aggregate) or
-        "raw" (individual point). Returns [] when the point carries no usable value.
+        `unit` is None when the row uses the data type's canonical unit from
+        UNIT_MAP; a non-None value overrides it (exercise sub-metrics each carry a
+        different unit). A single point can produce multiple rows (a heart-rate
+        daily rollup yields avg/min/max; an exercise session yields one row per
+        workout metric). `granularity` is "daily" (dailyRollUp aggregate) or "raw".
+        Returns [] when the point carries no usable value.
         """
         if granularity == "daily":
-            return HealthSyncScheduler._extract_daily_rollup_rows(data_type, point)
+            return [(label, v, ts, None)
+                    for label, v, ts in HealthSyncScheduler._extract_daily_rollup_rows(data_type, point)]
+
+        # Exercise sessions are not a time series: emit one row per workout metric,
+        # each with its own unit (they are "event" cadence and never daily-folded).
+        if data_type == "exercise":
+            return HealthSyncScheduler._extract_exercise_rows(point)
 
         # Raw move/heart minutes carry a per-level/per-zone breakdown — emit one
         # row per level/zone instead of a single summed value.
         if data_type in ("move_minutes", "heart_minutes"):
-            return HealthSyncScheduler._extract_raw_minutes_rows(data_type, point)
+            return [(label, v, ts, None)
+                    for label, v, ts in HealthSyncScheduler._extract_raw_minutes_rows(data_type, point)]
 
         extracted = HealthSyncScheduler._extract_v4_point(data_type, point)
         if not extracted:
             return []
         value, recorded_at = extracted
-        return [(data_type, value, recorded_at)]
+        # Scalar types: the stored metric_type equals the internal data_type, which
+        # UNIT_MAP maps to the definition's canonical unit.
+        return [(data_type, value, recorded_at, None)]
 
     @staticmethod
     def _extract_raw_minutes_rows(data_type: str, point: dict) -> list[tuple[str, float, datetime]]:
@@ -682,6 +711,53 @@ class HealthSyncScheduler:
             zone = (payload.get("heartRateZone") or "").replace("_", " ").strip().title()
             if v is not None and zone:
                 rows.append((f"Heart Minutes ({zone})", v, recorded_at))
+        return rows
+
+    @staticmethod
+    def _extract_exercise_rows(point: dict) -> list[tuple[str, float, datetime, str | None]]:
+        """Extract one row per workout metric from an exercise (session) point.
+
+        A workout session carries several metrics at once; each is stored as its
+        own "event" metric with a name distinct from the daily totals (e.g.
+        "Workout Calories" vs. "Calories") so they never merge into the daily
+        Steps/Distance/Calories rollups. All sub-metrics share the session's
+        startTime. Verified payload fields (live, 2026-10-02):
+          activeDuration "1268s"; metricsSummary.{caloriesKcal, distanceMillimeters,
+          averageHeartRateBeatsPerMinute, steps}; interval.startTime.
+        """
+        def f(x):
+            try:
+                return float(x)
+            except (TypeError, ValueError):
+                return None
+
+        payload = point.get("exercise") or {}
+        ts_str = (payload.get("interval") or {}).get("startTime")
+        if not ts_str:
+            return []
+        try:
+            recorded_at = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+        except ValueError:
+            return []
+        if recorded_at.tzinfo is None:
+            recorded_at = recorded_at.replace(tzinfo=timezone.utc)
+
+        summary = payload.get("metricsSummary") or {}
+        rows: list[tuple[str, float, datetime, str | None]] = []
+
+        # activeDuration "1268s" -> minutes
+        dur = f(payload.get("activeDuration"))
+        if dur is not None:
+            rows.append(("Workout Duration", dur / 60.0, recorded_at, "minutes"))
+        v = f(summary.get("caloriesKcal"))
+        if v is not None:
+            rows.append(("Workout Calories", v, recorded_at, "kcal"))
+        v = f(summary.get("distanceMillimeters"))
+        if v is not None:
+            rows.append(("Workout Distance", v / 1000.0, recorded_at, "meters"))
+        v = f(summary.get("averageHeartRateBeatsPerMinute"))
+        if v is not None:
+            rows.append(("Workout Avg Heart Rate", v, recorded_at, "bpm"))
         return rows
 
     @staticmethod
@@ -795,6 +871,10 @@ class HealthSyncScheduler:
             "height": "height",
             "heart_minutes": "activeZoneMinutes",
             "move_minutes": "activeMinutes",
+            # New sample types (2026-10-02).
+            "heart_rate_variability": "heartRateVariability",
+            "oxygen_saturation_raw": "oxygenSaturation",
+            "vo2_max": "vo2Max",
         }
         union_field = union_field_map.get(data_type)
         if not union_field:
@@ -883,6 +963,24 @@ class HealthSyncScheduler:
             if "heightMillimeters" not in payload:
                 return None
             value = float(payload["heightMillimeters"]) / 1000.0  # mm -> meters
+            ts_str = sample_time.get("physicalTime")
+        elif data_type == "heart_rate_variability":
+            # HRV-RMSSD, already in milliseconds (a float in the payload).
+            if "rootMeanSquareOfSuccessiveDifferencesMilliseconds" not in payload:
+                return None
+            value = float(payload["rootMeanSquareOfSuccessiveDifferencesMilliseconds"])
+            ts_str = sample_time.get("physicalTime")
+        elif data_type == "oxygen_saturation_raw":
+            # Per-minute SpO2 sample (distinct from the daily `oxygen_saturation`).
+            if "percentage" not in payload:
+                return None
+            value = float(payload["percentage"])
+            ts_str = sample_time.get("physicalTime")
+        elif data_type == "vo2_max":
+            # VO2 max in ml/kg/min (a number), sparse/event data.
+            if "vo2Max" not in payload:
+                return None
+            value = float(payload["vo2Max"])
             ts_str = sample_time.get("physicalTime")
         else:
             return None

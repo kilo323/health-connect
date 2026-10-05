@@ -61,7 +61,8 @@ RAW_RETENTION_KEY = "sync_raw_retention"
 RAW_RETENTION_DESCRIPTION = (
     "Days of non-rolled-up (raw) Google data to keep before compacting it into a "
     "daily rollup and deleting the raw rows. Applies to rollup-enabled metrics "
-    "only (heart_rate, move_minutes, steps, distance). 0 = keep raw forever."
+    "(heart_rate, move_minutes, steps, distance) and locally-compacted metrics "
+    "(heart_rate_variability, oxygen_saturation_raw). 0 = keep raw forever."
 )
 DEFAULT_RAW_RETENTION_DAYS = 90
 DEFAULT_HOURLY_RETENTION_DAYS = 730  # 0 = keep hourly rows forever
@@ -115,7 +116,36 @@ COMPACTION_RULES: dict[str, dict] = {
         "source": "Distance",
         "daily": [("self", "sum")],
     },
+    # High-volume vitals that have NO Google dailyRollUp endpoint, so their raw
+    # rows are compacted LOCALLY: daily row = avg of the day's samples. These use
+    # "self" (daily row written to the SAME metric_type as the raw) on purpose —
+    # unlike heart_rate, where the daily row must be a separate series. It's safe
+    # because:
+    #   * intraday charts read raw only (granularity='raw'), so they stay exact
+    #     while raw still exists (inside the retention window);
+    #   * past retention the daily avg is written, raw deleted, and the daily
+    #     report reads the daily row while the intraday chart falls back to the
+    #     hourly tier (stage 1 always builds it).
+    # See LOCAL_COMPACT below for the prune gate.
+    "heart_rate_variability": {
+        "source": "Heart Rate Variability",
+        "daily": [("self", "avg")],
+        "self_kind": "avg",
+    },
+    "oxygen_saturation_raw": {
+        "source": "Oxygen Saturation (Raw)",
+        "daily": [("self", "avg")],
+        "self_kind": "avg",
+    },
 }
+
+# Metrics whose raw rows are compacted locally (no Google dailyRollUp endpoint
+# exists for them). They get the same safety as rollup-enabled metrics: hourly
+# tier always, daily avg written past raw_retention_days, raw deleted only after
+# the daily row is read back. Kept separate from ROLLUP_CAPABLE so the SYNC
+# path (which gates fetch_daily_rollup on ROLLUP_CAPABLE) never tries to call
+# the nonexistent rollup endpoint for these types.
+LOCAL_COMPACT = {"heart_rate_variability", "oxygen_saturation_raw"}
 
 # Unit used when the raw rows' own unit is unavailable (resolved labels only).
 _KIND_UNIT = {"avg": "bpm", "min": "bpm", "max": "bpm", "sum": "minutes"}
@@ -268,7 +298,10 @@ async def compact_raw_metrics(dry_run: bool = False) -> dict:
         for data_type in candidates:
             rule = COMPACTION_RULES[data_type]
             daily_specs = rule["daily"]
-            can_prune = data_type in enabled
+            # Prune-eligible: rollup-enabled metrics (admin-toggleable) OR the
+            # LOCAL_COMPACT vitals (no rollup endpoint; always safe to compact
+            # because their daily row is a plain avg of the day's own samples).
+            can_prune = (data_type in enabled) or (data_type in LOCAL_COMPACT)
 
             # Resolve each rule label to (canonical_name, kind, definition_id)
             # once, so derived rows are linked to the metric library like
@@ -317,7 +350,7 @@ async def compact_raw_metrics(dry_run: bool = False) -> dict:
                     norm = await metric_normalizer.normalize(db, st, unit_row or "")
                     self_specs[st] = [(
                         norm.canonical_name if norm.definition else st,
-                        "sum",
+                        rule.get("self_kind", "sum"),
                         norm.definition.id if norm.definition else None,
                     )]
 

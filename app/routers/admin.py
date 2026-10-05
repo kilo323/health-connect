@@ -449,6 +449,46 @@ async def debug_sync_task(
     return {"sync_in_progress": scheduler.sync_in_progress, "task_name": None, "stack": []}
 
 
+@router.get("/sync/google-probe")
+async def probe_google_data_types(
+    current_user: UserResponse = Depends(get_current_user),
+):
+    """Probe the live Google Health API to see which data types are exposed vs.
+    synced (admin only). Read-only: issues GET dataPoints requests only.
+
+    A ``user_id`` may be supplied to probe a specific account; by default the
+    first user with stored Google Health tokens is probed (there is no catalog
+    endpoint, so the scan must run against a real account).
+    """
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    import asyncio
+    from ..database import async_session_factory
+    from ..services.google_health import GoogleHealthService
+
+    # Resolve which user to probe.
+    async with async_session_factory() as db:
+        rows = (await db.execute(
+            select(AppSettings.key).where(AppSettings.key.like("google_health_tokens_%")).order_by(AppSettings.key)
+        )).scalars().all()
+    token_user_ids = [int(r.rsplit("_", 1)[1]) for r in rows if r.rsplit("_", 1)[1].isdigit()]
+
+    user_id = current_user.id if current_user.id in token_user_ids else (token_user_ids[0] if token_user_ids else current_user.id)
+    if not token_user_ids:
+        raise HTTPException(status_code=400, detail="No user has Google Health tokens stored. Connect a Google account first.")
+
+    svc = GoogleHealthService()
+    try:
+        result = await asyncio.wait_for(svc.probe_data_types(user_id), timeout=120)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Google probe failed: {exc}")
+
+    result["probed_user_id"] = user_id
+    result["candidates_total"] = len(GoogleHealthService.PROBE_CANDIDATES)
+    return result
+
+
 @router.get("/sync/compaction")
 async def get_compaction_settings(
     current_user: UserResponse = Depends(get_current_user),

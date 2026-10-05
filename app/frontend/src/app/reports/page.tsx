@@ -66,6 +66,14 @@ const METRIC_LABELS: Record<string, string> = {
   move_minutes: 'Move Minutes',
   bmr: 'BMR',
   speed: 'Speed',
+  // Canonical names from Google data types added 2026-10-02.
+  'Heart Rate Variability': 'HRV',
+  'Oxygen Saturation (Raw)': 'SpO2 (Raw)',
+  'VO2 Max': 'VO2 Max',
+  'Workout Duration': 'Workout Duration',
+  'Workout Calories': 'Workout Calories',
+  'Workout Distance': 'Workout Distance',
+  'Workout Avg Heart Rate': 'Workout Avg HR',
 };
 
 const METRIC_COLORS: Record<string, string> = {
@@ -88,6 +96,14 @@ const METRIC_COLORS: Record<string, string> = {
   move_minutes: '#059669',
   bmr: '#d97706',
   speed: '#0ea5e9',
+  // Canonical names from Google data types added 2026-10-02.
+  'Heart Rate Variability': '#0891b2',
+  'Oxygen Saturation (Raw)': '#2dd4bf',
+  'VO2 Max': '#7c3aed',
+  'Workout Duration': '#db2777',
+  'Workout Calories': '#f97316',
+  'Workout Distance': '#10b981',
+  'Workout Avg Heart Rate': '#ef4444',
 };
 
 function TrendIcon({ trend }: { trend: 'up' | 'down' | 'flat' | null }) {
