@@ -19,6 +19,7 @@ services:
       retries: 3
       start_period: 20s
     environment:
+      - TZ=${TZ:-America/New_York}
       - BACKEND_PORT=${BACKEND_PORT:-8000}
       - FRONTEND_PORT=${FRONTEND_PORT:-3000}
       - ADMIN_USER=${ADMIN_USER:-admin}

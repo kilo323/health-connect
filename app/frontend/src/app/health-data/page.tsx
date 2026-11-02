@@ -31,6 +31,7 @@ export default function HealthDataPage() {
   const [filterMetricType, setFilterMetricType] = useState<string>('all');
   const [availableTypes, setAvailableTypes] = useState<string[]>([]);
   const [intradayTypes, setIntradayTypes] = useState<IntradayOption[]>([]);
+  const [timeZone, setTimeZone] = useState<string | undefined>(undefined);
   const { convert, formatValue: formatMetricDisplay, loaded: unitsLoaded } = useUnitConversion();
 
   // Convert a metric value to the user's preferred display unit
@@ -69,6 +70,12 @@ export default function HealthDataPage() {
       setIntradayTypes(data);
     } catch (error) {
       console.error('Failed to load intraday metric types:', error);
+    }
+    try {
+      const tzRes = await apiClient.get('/users/me/timezone');
+      setTimeZone(tzRes.data?.timezone);
+    } catch {
+      // The chart falls back to UTC day windows.
     }
   };
 
@@ -139,7 +146,7 @@ export default function HealthDataPage() {
       </div>
 
       {/* Intraday chart — only for metrics that still have raw samples. */}
-      {intradayTypes.length > 0 && <IntradayChart options={intradayTypes} />}
+      {intradayTypes.length > 0 && <IntradayChart options={intradayTypes} timeZone={timeZone} />}
 
       {/* Filters */}
       <div className="flex items-center gap-3 mb-6 flex-wrap">        <div className="relative flex-1 min-w-[200px]">

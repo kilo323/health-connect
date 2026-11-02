@@ -67,7 +67,14 @@ npm run build
 
 # Verification (the stand-in for a test suite; see scripts/test_*.py, scripts/verify_*.py)
 .\.venv\Scripts\python.exe .\scripts\test_prune_and_hourly.py
+.\.venv\Scripts\python.exe .\scripts\test_interval_dedup.py
 ```
+
+`scripts/diagnose_steps.py` is a read-only diagnostic for step-count discrepancies
+(per-day totals, multi-device overlap, optional `--google` comparison against
+Google's own rollups). Daily rows can be repaired from those rollups via
+Admin → Sync Configuration → "Google Rollup Repair" (same logic as
+`scripts/destructive/rebuild_daily_steps.py`, which previews by default).
 
 ## Repository layout
 
@@ -116,9 +123,21 @@ component. It was deliberately removed when the granularity strategy shipped.
 - The unique key is `(user_id, metric_type, recorded_at, source)`, enforced by the
   `uq_health_metric_point` index. `_upsert_metric` writes with a single native
   `INSERT ... ON CONFLICT DO UPDATE`, so re-syncing refreshes a point instead of duplicating.
+- **Interval types are merged across data origins at ingest** (`app/services/interval_merge.py`):
+  Google reports the same activity from several devices (phone + watch), and their
+  overlapping intervals double-count when summed. Raw windows of steps/distance/
+  move/heart minutes are merged per local day with dominant-origin semantics (the
+  biggest device wins where it has coverage; others fill only uncovered gaps —
+  matches Google's own rollups) before storage. Sample types (heart rate) and
+  sessions (sleep/exercise) are not merged.
 - `granularity` is `raw` or `daily`. A `daily` row supersedes that day's `raw` rows **of the
-  same `metric_type` only**. That is why heart rate's daily parts are separate
-  `metric_types` (`Heart Rate (Average)/(Minimum)/(Maximum)`) — one row holds one value.
+  same `metric_type` only** in the read path: daily wins, raw backs the intraday
+  charts. The sync's closed-day rollup refresh writes daily rows WITHOUT deleting
+  raw (compaction prunes raw past retention); only the legacy pre-cutoff rollup
+  window deletes superseded raw rows. That is why heart rate's daily parts are
+  separate `metric_types` (`Heart Rate (Average)/(Minimum)/(Maximum)`) — one row
+  holds one value. Closed days self-heal to Google's exact rollup values via the
+  sync's rollup-refresh window (2-day heal tail).
 - Hourly rows live in the separate `metric_hourly` table by design: the unique key above
   would collide with raw rows at exact hour boundaries, and the daily-supersede rules would
   delete them. Do not merge the tables.
@@ -139,6 +158,15 @@ path-parameter route is unreachable. `GET /health/metrics/intraday-types` must s
   `YYYY-MM-DD HH:MM:SS.ffffff` string even when written with tz-aware datetimes. Do not mix
   DB-read timestamps with tz-aware ones in a single comparison — normalize first (see
   `_parse_dt` in `app/routers/health.py`).
+- **Day bucketing is by the user's timezone**, not UTC. `users.timezone` (IANA name,
+  NULL = server timezone resolved in `app/services/timezones.py` via tzlocal/env) drives a
+  `local_day(ts, tz)` SQLite function registered per connection in `app/database.py`.
+  Anything that groups or splits by calendar day (`_daily_metric_values`, compaction,
+  sync supersede) must use it or `local_day_bounds_utc()` — not `date(recorded_at)`.
+  Exception: `granularity='daily'` rows are **civil-date markers** (label stamped at UTC
+  midnight, same convention as Google rollups); bucket them with `date(recorded_at)` and
+  match them with `recorded_at == marker`, never a range. In SQL:
+  `CASE WHEN granularity='daily' THEN date(recorded_at) ELSE local_day(recorded_at, :tzi) END`.
 - The engine is in WAL mode with `synchronous=NORMAL` and `NullPool` on purpose: Google sync
   writes tens of thousands of rows per backfill, and idle pooled connections on a Docker bind
   mount (especially Windows) cause "database is locked".
@@ -173,6 +201,7 @@ directly from the environment or `.env` by their consumers:
 | `FORWARDED_ALLOW_IPS` | uvicorn CLI in `app/start.sh` |
 | `JWT_SECRET_KEY` | `app/routers/auth.py`, `app/routers/users.py` |
 | `FERNET_KEY` | `app/services/encryption.py` |
+| `USER_TIMEZONE` / `TZ` | `app/services/timezones.py` (server default day-bucketing timezone) |
 
 `METRIC_LIBRARY_PROTECT` is **inert** — there is no metric library file anymore, so nothing
 reads the flag. Don't add behaviour on top of it.

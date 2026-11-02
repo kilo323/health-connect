@@ -15,6 +15,14 @@ from ..models.health_data import DocumentStatus
 from ..services.google_health import GoogleHealthService, NOT_LINKED_MARKER
 from ..services.nextcloud import NextcloudService
 from ..services.metric_normalizer import metric_normalizer
+from ..services.interval_merge import IntervalSample, merge_interval_samples
+from ..services.timezones import (
+    get_user_timezone,
+    local_day_bounds_utc,
+    local_days_spanned,
+    now_local_day,
+    utc_to_local_day,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +128,13 @@ ROLLUP_CAPABLE = {
     "steps", "distance", "calories", "heart_rate", "move_minutes",
     "weight", "body_fat_percentage",
 }
+
+# Raw interval types merged across data origins before storage. Google reports
+# the same real-world activity from several devices at once (phone + watch);
+# their overlapping intervals double-count when summed (see
+# app/services/interval_merge.py). Sample types (heart rate) and session types
+# (sleep, exercise) are not interval accumulators and are excluded.
+INTERVAL_MERGE_TYPES = {"steps", "distance", "move_minutes", "heart_minutes"}
 
 # Sensible defaults. This is a GLOBAL (admin) setting with no per-user override;
 # stored in AppSettings under key "sync_rollup_config". See routers/admin.py.
@@ -335,6 +350,10 @@ async def sync_health_data(
     google_service = GoogleHealthService()
     types_to_sync = data_types or SYNC_DATA_TYPES
     rollup_cfg = await get_rollup_config()
+    # Effective timezone: daily-rollup supersede deletes below must clear the
+    # same LOCAL calendar day the rollup's civil date labels (timezones.py).
+    async with async_session_factory() as tz_db:
+        user_tz = await get_user_timezone(tz_db, user_id)
     total_saved = 0
     failed_from: datetime | None = None
     completed: list[str] = []
@@ -361,6 +380,9 @@ async def sync_health_data(
             is_rollup = rollup_enabled and data_type in ROLLUP_CAPABLE
 
             # Build the list of (granularity, window_start, window_end) to fetch.
+            # Granularity is "daily" (legacy rollup window, supersedes raw),
+            # "raw" (granular points) or "rollup" (closed-day rollup refresh,
+            # writes authoritative daily rows but keeps raw for intraday).
             windows: list[tuple[str, object, object]] = []
             if data_type in DAILY_ONLY_DATA_TYPES:
                 # No raw endpoint exists (e.g. total-calories) -> always daily.
@@ -371,17 +393,47 @@ async def sync_health_data(
                 if type_start < cutoff:
                     windows.append(("daily", type_start, min(cutoff, end_time)))
                 if end_time > cutoff:
-                    windows.append(("raw", max(cutoff, type_start), end_time))
+                    raw_start = max(cutoff, type_start)
+                    windows.append(("raw", raw_start, end_time))
+                    # Closed local days of the raw region (plus a 2-day heal
+                    # window, so a late-published rollup is picked up by later
+                    # syncs) also get Google's own dailyRollUp values. They are
+                    # written as authoritative daily rows — the read path
+                    # prefers them over the locally merged raw sum, which is
+                    # close to but not exactly Google's number. Without this
+                    # window, a closed day never sees its rollup again (later
+                    # sync windows start at the cursor) and would forever show
+                    # the merged raw estimate. The end bound is the local civil
+                    # date of "today" so today's partial rollup is never written.
+                    today_start = datetime(
+                        *(int(p) for p in now_local_day(user_tz).split("-")))
+                    rollup_start = min(
+                        datetime(*(int(p) for p in
+                                   utc_to_local_day(raw_start, user_tz).split("-"))),
+                        today_start - timedelta(days=2),
+                    )
+                    if rollup_start < today_start:
+                        windows.append(("rollup", rollup_start, today_start))
             elif is_rollup and cutoff_days == 0:
                 windows.append(("daily", type_start, end_time))  # roll up everything
             else:
                 windows.append(("raw", type_start, end_time))
 
+            if data_type in INTERVAL_MERGE_TYPES:
+                # Snap raw window starts down to a local-day boundary: the
+                # multi-device merge below replaces whole local days, so every
+                # fetched day must be complete. Extends the window by < 1 day.
+                windows = [
+                    (g, (local_day_bounds_utc(utc_to_local_day(s, user_tz), user_tz)[0]
+                         if g == "raw" else s), e)
+                    for g, s, e in windows
+                ]
+
             async with async_session_factory() as db:
                 saved_count = 0
                 uncommitted = 0
                 for granularity, w_start, w_end in windows:
-                    if granularity == "daily":
+                    if granularity in ("daily", "rollup"):
                         points = await google_service.fetch_daily_rollup(
                             user_id=user_id, data_type=data_type,
                             start_time=w_start, end_time=w_end,
@@ -394,20 +446,93 @@ async def sync_health_data(
                     if not points:
                         continue
 
-                    # Stream the window in slices instead of materialising every
-                    # row first: a raw heart-rate window can hold ~1M samples, and
-                    # holding them all as tuples costs hundreds of MB. Each slice is
-                    # written and committed before the next is extracted, so peak
-                    # memory stays flat and partial progress is durable.
-                    for slice_start in range(0, len(points), POINT_SLICE):
-                        window_rows: list[tuple[str, float, datetime, str | None]] = []
-                        for point in points[slice_start:slice_start + POINT_SLICE]:
+                    # Multi-device dedup: raw interval points from overlapping
+                    # device streams (phone + watch) double-count when summed.
+                    # Merge per LOCAL day (the dominant device wins where it has
+                    # coverage — see app/services/interval_merge.py) and
+                    # REPLACE that day's stored raw rows wholesale — delete +
+                    # insert in one transaction. Refetches (the 1-day cursor
+                    # overlap) then regenerate identical rows, and a revision in
+                    # Google's data can never leave stale ghost rows behind.
+                    # Other types stream the window in slices instead of
+                    # materialising every row first: a raw heart-rate window can
+                    # hold ~1M samples, and holding them all as tuples costs
+                    # hundreds of MB. Each slice is written and committed before
+                    # the next is extracted, so peak memory stays flat and
+                    # partial progress is durable.
+                    if granularity == "raw" and data_type in INTERVAL_MERGE_TYPES:
+                        samples: list[IntervalSample] = []
+                        for point in points:
                             try:
-                                window_rows.extend(
-                                    HealthSyncScheduler._extract_rows(data_type, point, granularity)
+                                samples.extend(
+                                    HealthSyncScheduler._extract_interval_samples(data_type, point)
                                 )
                             except Exception:
                                 continue
+                        # Clip samples to the local day they are merged into (a
+                        # midnight-spanning interval is split proportionally), so
+                        # every emitted row falls inside its day's replace range.
+                        by_day: dict[str, list[IntervalSample]] = {}
+                        for s in samples:
+                            for day, d_start, d_end in local_days_spanned(s.start, s.end, user_tz):
+                                o_start = max(s.start, d_start)
+                                o_end = min(s.end, d_end)
+                                if s.end > s.start:
+                                    if o_end <= o_start:
+                                        continue
+                                    frac = (o_end - o_start) / (s.end - s.start)
+                                    value = s.value * frac
+                                else:
+                                    value = s.value
+                                by_day.setdefault(day, []).append(
+                                    IntervalSample(s.label, value, o_start, o_end, s.origin))
+                        row_batches: list[tuple[str | None, list[tuple[str, float, datetime, str | None]]]] = []
+                        for day, day_samples in sorted(by_day.items()):
+                            merged = merge_interval_samples(day_samples)
+                            if merged:
+                                row_batches.append((
+                                    day,
+                                    [(label, value, ts, None) for label, value, ts in merged],
+                                ))
+                    else:
+                        row_batches = []
+                        for slice_start in range(0, len(points), POINT_SLICE):
+                            window_rows: list[tuple[str, float, datetime, str | None]] = []
+                            for point in points[slice_start:slice_start + POINT_SLICE]:
+                                try:
+                                    window_rows.extend(
+                                        HealthSyncScheduler._extract_rows(data_type, point, granularity)
+                                    )
+                                except Exception:
+                                    continue
+                            row_batches.append((None, window_rows))
+
+                    for replace_day, window_rows in row_batches:
+                        if replace_day is not None:
+                            # Day-scoped replace: drop the affected metric types'
+                            # raw rows of this local day first, then insert the
+                            # merged rows (same transaction).
+                            day_unit = UNIT_MAP.get(data_type, "unknown")
+                            replaced: set[str] = set()
+                            for metric_label, _value, _ts, _u in window_rows:
+                                norm = norm_cache.get((metric_label, day_unit))
+                                if norm is None:
+                                    norm = await metric_normalizer.normalize(
+                                        db, metric_label, day_unit)
+                                    norm_cache[(metric_label, day_unit)] = norm
+                                replaced.add(
+                                    norm.canonical_name if norm.definition else metric_label)
+                            day_start, day_end = local_day_bounds_utc(replace_day, user_tz)
+                            await db.execute(
+                                delete(HealthMetric).where(
+                                    HealthMetric.user_id == user_id,
+                                    HealthMetric.metric_type.in_(replaced),
+                                    HealthMetric.source == "google_health_connect",
+                                    HealthMetric.granularity == "raw",
+                                    HealthMetric.recorded_at >= day_start,
+                                    HealthMetric.recorded_at < day_end,
+                                )
+                            )
 
                         # A daily aggregate supersedes that day's granular rows (e.g. a
                         # cutoff change re-synced the day as a rollup). Collect the
@@ -431,7 +556,9 @@ async def sync_health_data(
                                 # Daily rollups are stored as authoritative daily
                                 # values; everything else is a granular point row
                                 # (including raw heart-rate samples).
-                                row_granularity = "daily" if granularity == "daily" else "raw"
+                                row_granularity = ("daily"
+                                                   if granularity in ("daily", "rollup")
+                                                   else "raw")
                                 await _upsert_metric(
                                     db,
                                     user_id=user_id,
@@ -445,8 +572,13 @@ async def sync_health_data(
                                 )
                                 saved_count += 1
                                 uncommitted += 1
-                                if row_granularity == "daily":
-                                    superseded.add((metric_type, recorded_at.date()))
+                                # The legacy daily window supersedes the day's raw
+                                # rows (e.g. a cutoff change re-synced the day as a
+                                # rollup). Closed-day "rollup" refreshes keep raw —
+                                # those rows back the intraday charts and are pruned
+                                # by compaction once past retention.
+                                if granularity == "daily":
+                                    superseded.add((metric_type, recorded_at.date().isoformat()))
                                 if uncommitted >= BATCH_COMMIT_ROWS:
                                     await db.commit()
                                     uncommitted = 0
@@ -458,12 +590,13 @@ async def sync_health_data(
                                 continue
 
                         for metric_type, day in superseded:
-                            # Half-open day range rather than func.date(...) == day:
+                            # Delete the raw rows of the same LOCAL calendar day
+                            # (the rollup's civil date labels a local day). Half-open
+                            # instant range rather than func.date(...) == day:
                             # wrapping the column in date() makes the predicate
                             # non-sargable, so this delete scanned the whole
                             # health_metrics table for every superseded day.
-                            day_start = datetime(day.year, day.month, day.day)
-                            day_end = day_start + timedelta(days=1)
+                            day_start, day_end = local_day_bounds_utc(day, user_tz)
                             await db.execute(
                                 delete(HealthMetric).where(
                                     HealthMetric.user_id == user_id,
@@ -650,7 +783,7 @@ class HealthSyncScheduler:
         workout metric). `granularity` is "daily" (dailyRollUp aggregate) or "raw".
         Returns [] when the point carries no usable value.
         """
-        if granularity == "daily":
+        if granularity in ("daily", "rollup"):
             return [(label, v, ts, None)
                     for label, v, ts in HealthSyncScheduler._extract_daily_rollup_rows(data_type, point)]
 
@@ -711,6 +844,91 @@ class HealthSyncScheduler:
             zone = (payload.get("heartRateZone") or "").replace("_", " ").strip().title()
             if v is not None and zone:
                 rows.append((f"Heart Minutes ({zone})", v, recorded_at))
+        return rows
+
+    @staticmethod
+    def _point_origin(point: dict) -> str:
+        """Best-effort data-origin id for a v4 DataPoint (which device recorded it).
+
+        Verified payload shape (live, 2026-11-01): ``dataSource`` is a dict with
+        ``device.displayName`` (e.g. "Pixel Watch 5"), ``platform`` and
+        ``recordingMethod``.
+        """
+        meta = point.get("metadata") or {}
+        origin = (meta.get("dataOrigin") or meta.get("dataSource")
+                  or point.get("dataSource"))
+        if isinstance(origin, dict):
+            device = origin.get("device") or {}
+            origin = (origin.get("name") or origin.get("id")
+                      or device.get("displayName") or device.get("uid")
+                      or origin.get("platform"))
+        return str(origin) if origin else "unknown"
+
+    @staticmethod
+    def _extract_interval_samples(data_type: str, point: dict) -> list[IntervalSample]:
+        """Extract IntervalSamples from a raw interval point for the multi-device merge.
+
+        Each sample is one device's count for a half-open interval [start, end).
+        Labels match what ``_extract_rows`` produces for the same point so merged
+        rows normalize and store identically to unmerged ones.
+        """
+        def f(x):
+            try:
+                return float(x)
+            except (TypeError, ValueError):
+                return None
+
+        union_field_map = {
+            "steps": "steps",
+            "distance": "distance",
+            "move_minutes": "activeMinutes",
+            "heart_minutes": "activeZoneMinutes",
+        }
+        union_field = union_field_map.get(data_type)
+        if not union_field:
+            return []
+        payload = point.get(union_field) or {}
+        interval = payload.get("interval") or {}
+        ts_start = interval.get("startTime")
+        ts_end = interval.get("endTime")
+        if not ts_start or not ts_end:
+            return []
+        try:
+            start = datetime.fromisoformat(ts_start.replace("Z", "+00:00"))
+            end = datetime.fromisoformat(ts_end.replace("Z", "+00:00"))
+        except ValueError:
+            return []
+        # Naive UTC (storage convention): merge clip bounds from
+        # local_day_bounds_utc() are naive, and mixing aware/naive raises.
+        if start.tzinfo is not None:
+            start = start.astimezone(timezone.utc).replace(tzinfo=None)
+        if end.tzinfo is not None:
+            end = end.astimezone(timezone.utc).replace(tzinfo=None)
+
+        origin = HealthSyncScheduler._point_origin(point)
+        rows: list[IntervalSample] = []
+
+        if data_type == "steps":
+            v = f(payload.get("count"))
+            if v is not None:
+                rows.append(IntervalSample("steps", v, start, end, origin))
+        elif data_type == "distance":
+            v = f(payload.get("millimeters"))
+            if v is not None:
+                rows.append(IntervalSample("distance", v / 1000.0, start, end, origin))
+        elif data_type == "move_minutes":
+            for e in payload.get("activeMinutesByActivityLevel", []):
+                v = f(e.get("activeMinutes"))
+                level = (e.get("activityLevel") or "").strip().title()
+                if v is not None and level:
+                    rows.append(IntervalSample(
+                        f"Active Minutes ({level})", v, start, end, origin))
+        else:  # heart_minutes
+            v = f(payload.get("activeZoneMinutes"))
+            zone = (payload.get("heartRateZone") or "").replace("_", " ").strip().title()
+            if v is not None and zone:
+                rows.append(IntervalSample(
+                    f"Heart Minutes ({zone})", v, start, end, origin))
         return rows
 
     @staticmethod

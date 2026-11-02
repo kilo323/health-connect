@@ -46,13 +46,59 @@ interface Props {
    * dashboard passes its own period selector here so both stay in sync.
    */
   days?: number;
+  /**
+   * IANA timezone the backend buckets days by (the user's effective timezone).
+   * When set, a picked day spans that local day; otherwise UTC (legacy).
+   */
+  timeZone?: string;
 }
 
-function dayBounds(dateStr: string): { start: string; end: string } {
-  // Build an explicit UTC range for the chosen calendar day. Using date strings
-  // avoids the browser's local timezone shifting the window by a day.
-  const start = new Date(`${dateStr}T00:00:00Z`);
-  const end = new Date(start.getTime() + 24 * 60 * 60 * 1000);
+/** Offset (ms) of `timeZone` at the given instant (positive east of UTC). */
+function tzOffsetMs(utc: Date, timeZone: string): number {
+  const dtf = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+  });
+  const map: Record<string, string> = {};
+  for (const p of dtf.formatToParts(utc)) map[p.type] = p.value;
+  const asUtc = Date.UTC(
+    Number(map.year), Number(map.month) - 1, Number(map.day),
+    Number(map.hour) % 24, Number(map.minute), Number(map.second)
+  );
+  return asUtc - utc.getTime();
+}
+
+/** UTC instant of the local midnight starting `dateStr` in `timeZone`. */
+function localMidnightUtc(dateStr: string, timeZone: string): Date {
+  const midnight = new Date(`${dateStr}T00:00:00Z`).getTime();
+  let ts = midnight - tzOffsetMs(new Date(midnight), timeZone);
+  ts = midnight - tzOffsetMs(new Date(ts), timeZone); // refine across DST edges
+  return new Date(ts);
+}
+
+/** 'YYYY-MM-DD' of an instant in `timeZone` (defaults to UTC). */
+function dayInTz(instant: Date | string, timeZone?: string): string {
+  if (!timeZone) return new Date(instant).toISOString().slice(0, 10);
+  // en-CA formats as YYYY-MM-DD.
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone, year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(new Date(instant));
+}
+
+function dayBounds(dateStr: string, timeZone?: string): { start: string; end: string } {
+  if (!timeZone) {
+    // Build an explicit UTC range for the chosen calendar day. Using date strings
+    // avoids the browser's local timezone shifting the window by a day.
+    const start = new Date(`${dateStr}T00:00:00Z`);
+    const end = new Date(start.getTime() + 24 * 60 * 60 * 1000);
+    return { start: start.toISOString(), end: end.toISOString() };
+  }
+  // Span the chosen LOCAL day so the window matches the backend's day buckets.
+  const start = localMidnightUtc(dateStr, timeZone);
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const nextDay = new Date(Date.UTC(y, m - 1, d + 1)).toISOString().slice(0, 10);
+  const end = localMidnightUtc(nextDay, timeZone);
   return { start: start.toISOString(), end: end.toISOString() };
 }
 
@@ -99,7 +145,7 @@ function preferredDefault(options: IntradayOption[]): string {
  * period filter. Drawing the min-max band plus the average line keeps the
  * shape honest without shipping ~30k samples per day to the browser.
  */
-export default function IntradayChart({ options, maxPoints = 180, days }: Props) {
+export default function IntradayChart({ options, maxPoints = 180, days, timeZone }: Props) {
   const rangeMode = days !== undefined;
   const [metricType, setMetricType] = useState<string>('');
   const [date, setDate] = useState<string>(todayUtc());
@@ -118,14 +164,21 @@ export default function IntradayChart({ options, maxPoints = 180, days }: Props)
     );
     if (rangeMode) return;
     const last = options.find((o) => o.metric_type === next)?.last_at;
-    if (last) setDate(last.slice(0, 10));
+    if (last) setDate(dayInTz(last, timeZone));
     // Intentionally only re-run when the option set itself changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [options]);
 
+  // When the effective timezone arrives after mount, fix the auto-selected
+  // "today" (a UTC date can be a different local day). User-picked days and
+  // days opened from data are left alone.
+  useEffect(() => {
+    setDate((cur) => (cur === todayUtc() ? dayInTz(new Date(), timeZone) : cur));
+  }, [timeZone]);
+
   const window = useMemo(
-    () => (rangeMode ? rangeBounds(days!, options) : dayBounds(date)),
-    [rangeMode, days, options, date]
+    () => (rangeMode ? rangeBounds(days!, options) : dayBounds(date, timeZone)),
+    [rangeMode, days, options, date, timeZone]
   );
 
   // A multi-day window gets more slices so the shape stays legible; the

@@ -27,6 +27,7 @@ from ..services.nextcloud import NextcloudService
 from ..services.llm import LLMService
 from ..services.encryption import encryption_service
 from ..services import metric_registry
+from ..services.timezones import get_user_timezone, utc_to_local_day
 
 router = APIRouter(prefix="/health", tags=["Health Data"])
 logger = logging.getLogger(__name__)
@@ -81,9 +82,16 @@ async def _daily_metric_values(
        "aggregation", "cadence"}
     """
     registry = await metric_registry.load_registry(db)
+    # Day bucketing follows the user's local calendar day (timezones.py). Daily
+    # rows are civil-date markers (UTC midnight of their label) and keep their
+    # label with date(); everything else is an instant bucketed via local_day().
+    tzi = await get_user_timezone(db, user_id)
+    day_expr = ("CASE WHEN granularity = 'daily' THEN date(recorded_at) "
+                "ELSE local_day(recorded_at, :tzi) END")
+    hour_day_expr = "local_day(recorded_at, :tzi)"
 
     where = ["user_id = :uid"]
-    params: dict = {"uid": user_id}
+    params: dict = {"uid": user_id, "tzi": tzi}
     if metric_type:
         where.append("metric_type = :mt")
         params["mt"] = metric_type
@@ -91,15 +99,21 @@ async def _daily_metric_values(
         where.append("recorded_at >= :sd")
         params["sd"] = _as_naive_utc(start_date) if start_date.tzinfo else start_date
     if year is not None:
-        where.append("strftime('%Y', recorded_at) = :yr")
         params["yr"] = str(year)
     where_sql = " AND ".join(where)
+    # The year filter buckets by the same day expression, and metric_hourly has
+    # no granularity column, so each table needs its own WHERE variant.
+    hm_where_sql = where_sql
+    mh_where_sql = where_sql
+    if year is not None:
+        hm_where_sql += f" AND substr({day_expr}, 1, 4) = :yr"
+        mh_where_sql += f" AND substr({hour_day_expr}, 1, 4) = :yr"
 
     # One pass for the aggregates, one for the representative row of each day
     # (unit/source/metadata): the daily row if there is one, else the latest raw.
     sql = text(f"""
         WITH agg AS (
-            SELECT metric_type, date(recorded_at) AS day,
+            SELECT metric_type, {day_expr} AS day,
                    SUM(CASE WHEN granularity = 'daily' THEN 1 ELSE 0 END) AS daily_n,
                    MAX(CASE WHEN granularity = 'daily' THEN value END) AS daily_value,
                    SUM(CASE WHEN granularity <> 'daily' THEN value END) AS raw_sum,
@@ -109,20 +123,20 @@ async def _daily_metric_values(
                    SUM(CASE WHEN granularity <> 'daily' THEN 1 ELSE 0 END) AS raw_n,
                    COUNT(*) AS n
             FROM health_metrics
-            WHERE {where_sql}
-            GROUP BY metric_type, date(recorded_at)
+            WHERE {hm_where_sql}
+            GROUP BY metric_type, day
         ),
         rep AS (
-            SELECT metric_type, date(recorded_at) AS day, id, user_id, value,
+            SELECT metric_type, {day_expr} AS day, id, user_id, value,
                    unit, source, recorded_at, created_at, source_document,
                    definition_id, reference_range,
                    ROW_NUMBER() OVER (
-                       PARTITION BY metric_type, date(recorded_at)
+                       PARTITION BY metric_type, {day_expr}
                        ORDER BY CASE WHEN granularity = 'daily' THEN 0 ELSE 1 END,
                                 recorded_at DESC, id DESC
                    ) AS rn
             FROM health_metrics
-            WHERE {where_sql}
+            WHERE {hm_where_sql}
         )
         SELECT a.metric_type, a.day, a.daily_n, a.daily_value,
                a.raw_sum, a.raw_avg, a.raw_min, a.raw_max, a.raw_n, a.n,
@@ -145,22 +159,22 @@ async def _daily_metric_values(
     # Tier 3: hourly rows for days health_metrics no longer covers.
     hourly_sql = text(f"""
         WITH agg AS (
-            SELECT metric_type, date(recorded_at) AS day,
+            SELECT metric_type, {hour_day_expr} AS day,
                    SUM(value) AS total, AVG(value) AS mean,
                    MIN(value) AS lo, MAX(value) AS hi, COUNT(*) AS n
             FROM metric_hourly
-            WHERE {where_sql}
-            GROUP BY metric_type, date(recorded_at)
+            WHERE {mh_where_sql}
+            GROUP BY metric_type, day
         ),
         rep AS (
-            SELECT metric_type, date(recorded_at) AS day, id, user_id, value,
+            SELECT metric_type, {hour_day_expr} AS day, id, user_id, value,
                    unit, source, recorded_at, created_at, definition_id,
                    ROW_NUMBER() OVER (
-                       PARTITION BY metric_type, date(recorded_at)
+                       PARTITION BY metric_type, {hour_day_expr}
                        ORDER BY recorded_at DESC, id DESC
                    ) AS rn
             FROM metric_hourly
-            WHERE {where_sql}
+            WHERE {mh_where_sql}
         )
         SELECT a.metric_type, a.day, a.total, a.mean, a.lo, a.hi, a.n,
                r.id, r.user_id, r.value AS rep_value, r.unit, r.source,
@@ -804,10 +818,15 @@ async def _derived_series(
         }
 
     # 2. Daily rows (a day's sum/avg, with the companion band for avg_minmax).
+    # Slice by local calendar days (the day labels are local). Daily rows are
+    # civil-date markers at UTC midnight, so fetch a small margin and let the
+    # day-label filter do the precise trimming.
+    tz_name = await get_user_timezone(db, user_id)
     daily = await _daily_metric_values(
-        db, user_id=user_id, metric_type=metric_type, start_date=start)
-    start_day = start.date().isoformat()
-    end_day = end.date().isoformat()
+        db, user_id=user_id, metric_type=metric_type,
+        start_date=start - timedelta(days=2))
+    start_day = utc_to_local_day(start, tz_name)
+    end_day = utc_to_local_day(end, tz_name)
     entries = [d for d in daily if start_day <= d["day"] < end_day]
     points = [
         {"t": f"{d['day']}T00:00:00", "min": d["min_value"], "max": d["max_value"],

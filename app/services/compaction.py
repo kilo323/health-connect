@@ -53,6 +53,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from ..database import async_session_factory
 from ..models.health_data import HealthMetric, MetricHourly
 from ..models.settings import AppSettings
+from .timezones import get_user_timezone, local_day_bounds_utc, now_local_day
 
 logger = logging.getLogger(__name__)
 
@@ -280,7 +281,6 @@ async def compact_raw_metrics(dry_run: bool = False) -> dict:
     # recorded_at is stored naive-UTC in SQLite, so compare against naive bounds.
     now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
     cutoff = now_utc - timedelta(days=retention_days) if retention_days > 0 else None
-    today = datetime(now_utc.year, now_utc.month, now_utc.day)  # days < today are closed
     summary["cutoff"] = cutoff.isoformat() if cutoff else None
 
     enabled = set(await _rollup_enabled_data_types())
@@ -354,32 +354,50 @@ async def compact_raw_metrics(dry_run: bool = False) -> dict:
                         norm.definition.id if norm.definition else None,
                     )]
 
-            # Every closed day (day < today) that still has raw rows. Cutoff is
-            # applied per group so hourly/early-close run inside retention.
-            targets = (await db.execute(
-                select(
-                    HealthMetric.user_id,
-                    HealthMetric.metric_type,
-                    func.date(HealthMetric.recorded_at).label("day"),
-                    func.count(HealthMetric.id),
-                )
+            # Every closed LOCAL day (before today in the user's timezone) that
+            # still has raw rows. Cutoff is applied per group so hourly/early-close
+            # run inside retention. Day bucketing follows the user's timezone.
+            targets: list[tuple] = []
+            for (uid,) in (await db.execute(
+                select(HealthMetric.user_id)
                 .where(
                     HealthMetric.source == "google_health_connect",
                     HealthMetric.granularity == "raw",
                     HealthMetric.metric_type.in_(source_types),
-                    func.date(HealthMetric.recorded_at) < today.date().isoformat(),
+                ).distinct())).all():
+                tz_name = await get_user_timezone(db, uid)
+                today_str = now_local_day(tz_name)  # days < today are closed
+                day_expr = func.local_day(HealthMetric.recorded_at, tz_name)
+                targets.extend(
+                    (row[0], row[1], row[2], row[3], tz_name)
+                    for row in (await db.execute(
+                        select(
+                            HealthMetric.user_id,
+                            HealthMetric.metric_type,
+                            day_expr.label("day"),
+                            func.count(HealthMetric.id),
+                        )
+                        .where(
+                            HealthMetric.source == "google_health_connect",
+                            HealthMetric.granularity == "raw",
+                            HealthMetric.metric_type.in_(source_types),
+                            day_expr < today_str,
+                        )
+                        .group_by(HealthMetric.user_id, HealthMetric.metric_type,
+                                  day_expr)
+                    )).all()
                 )
-                .group_by(HealthMetric.user_id, HealthMetric.metric_type,
-                          func.date(HealthMetric.recorded_at))
-            )).all()
 
-            for user_id, metric_type, day_str, n_rows in targets:
+            for user_id, metric_type, day_str, n_rows, tz_name in targets:
                 if not day_str:
                     continue
                 try:
-                    day = datetime.fromisoformat(day_str)
-                    midnight = datetime(day.year, day.month, day.day)
-                    day_end = midnight + timedelta(days=1)
+                    # The local day's raw rows as UTC instants (DST-safe), and
+                    # the civil-date marker at UTC midnight used to stamp the
+                    # daily row (same convention as Google rollups).
+                    day_start, day_end = local_day_bounds_utc(day_str, tz_name)
+                    y, mo, d = (int(p) for p in day_str.split("-"))
+                    midnight = datetime(y, mo, d)
                     past_cutoff = cutoff is not None and day_end <= cutoff
 
                     rows = (await db.execute(
@@ -390,7 +408,7 @@ async def compact_raw_metrics(dry_run: bool = False) -> dict:
                             HealthMetric.granularity == "raw",
                             HealthMetric.user_id == user_id,
                             HealthMetric.metric_type == metric_type,
-                            HealthMetric.recorded_at >= midnight,
+                            HealthMetric.recorded_at >= day_start,
                             HealthMetric.recorded_at < day_end,
                         ))).all()
                     if not rows:
@@ -462,7 +480,8 @@ async def compact_raw_metrics(dry_run: bool = False) -> dict:
                             continue
                         # Keep an existing authoritative daily row (Google's own
                         # rollup for a boundary day) rather than overwriting it
-                        # with a recomputed sum.
+                        # with a recomputed sum. Daily rows are civil-date
+                        # markers at UTC midnight, so match the marker directly.
                         if should_close_daily:
                             existing = (await db.execute(
                                 select(func.count(HealthMetric.id)).where(
@@ -470,8 +489,7 @@ async def compact_raw_metrics(dry_run: bool = False) -> dict:
                                     HealthMetric.granularity == "daily",
                                     HealthMetric.user_id == user_id,
                                     HealthMetric.metric_type == label,
-                                    HealthMetric.recorded_at >= midnight,
-                                    HealthMetric.recorded_at < day_end,
+                                    HealthMetric.recorded_at == midnight,
                                 ))).scalar_one()
                             if existing:
                                 written.append(label)
@@ -524,7 +542,7 @@ async def compact_raw_metrics(dry_run: bool = False) -> dict:
                                 HealthMetric.granularity == "raw",
                                 HealthMetric.user_id == user_id,
                                 HealthMetric.metric_type == metric_type,
-                                HealthMetric.recorded_at >= midnight,
+                                HealthMetric.recorded_at >= day_start,
                                 HealthMetric.recorded_at < day_end,
                             ))
                         summary["raw_rows_deleted"] += n_rows
@@ -546,34 +564,39 @@ async def compact_raw_metrics(dry_run: bool = False) -> dict:
 
         # ── Hourly pruning: past hourly retention, and only for days that
         # already have an authoritative daily row (otherwise the hourly rows are
-        # the only sub-daily history left). ──────────────────────────────────
+        # the only sub-daily history left). Day labels are local (per user), so
+        # the daily-row match compares the marker date against the hourly row's
+        # local day. ────────────────────────────────────────────────────────
         if hourly_retention_days > 0:
             h_cutoff = now_utc - timedelta(days=hourly_retention_days)
             try:
-                stale = (await db.execute(
-                    select(func.count(MetricHourly.id)).where(
-                        MetricHourly.recorded_at < h_cutoff,
-                        ~select(HealthMetric.id).where(
-                            HealthMetric.user_id == MetricHourly.user_id,
-                            HealthMetric.metric_type == MetricHourly.metric_type,
-                            HealthMetric.granularity == "daily",
-                            func.date(HealthMetric.recorded_at)
-                            == func.date(MetricHourly.recorded_at),
-                        ).exists(),
-                    ))).scalar_one()
-                if stale and not dry_run:
-                    await db.execute(
-                        delete(MetricHourly).where(
+                stale = 0
+                hourly_users = [r[0] for r in (await db.execute(
+                    select(MetricHourly.user_id).distinct())).all()]
+                for uid in hourly_users:
+                    tz_name = await get_user_timezone(db, uid)
+                    has_daily = select(HealthMetric.id).where(
+                        HealthMetric.user_id == MetricHourly.user_id,
+                        HealthMetric.metric_type == MetricHourly.metric_type,
+                        HealthMetric.granularity == "daily",
+                        func.date(HealthMetric.recorded_at)
+                        == func.local_day(MetricHourly.recorded_at, tz_name),
+                    ).exists()
+                    n_stale = (await db.execute(
+                        select(func.count(MetricHourly.id)).where(
+                            MetricHourly.user_id == uid,
                             MetricHourly.recorded_at < h_cutoff,
-                            ~select(HealthMetric.id).where(
-                                HealthMetric.user_id == MetricHourly.user_id,
-                                HealthMetric.metric_type == MetricHourly.metric_type,
-                                HealthMetric.granularity == "daily",
-                                func.date(HealthMetric.recorded_at)
-                                == func.date(MetricHourly.recorded_at),
-                            ).exists(),
-                        ))
-                    await db.commit()
+                            ~has_daily,
+                        ))).scalar_one()
+                    if n_stale and not dry_run:
+                        await db.execute(
+                            delete(MetricHourly).where(
+                                MetricHourly.user_id == uid,
+                                MetricHourly.recorded_at < h_cutoff,
+                                ~has_daily,
+                            ))
+                        await db.commit()
+                    stale += n_stale
                 summary["hourly_rows_deleted"] = stale
             except Exception as e:
                 await db.rollback()

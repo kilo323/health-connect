@@ -526,6 +526,7 @@ export default function DashboardPage() {
   const [editMetrics, setEditMetrics] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
   const [intradayTypes, setIntradayTypes] = useState<IntradayOption[]>([]);
+  const [timeZone, setTimeZone] = useState<string | undefined>(undefined);
 
   useEffect(() => { loadData(); }, [period]);
 
@@ -542,17 +543,19 @@ export default function DashboardPage() {
   const loadData = async () => {
     setLoading(true);
     try {
-      const [reportRes, defsRes, intradayRes] = await Promise.allSettled([
+      const [reportRes, defsRes, intradayRes, tzRes] = await Promise.allSettled([
         // Cards and sparklines are day-over-day artifacts: always daily series.
         apiClient.get('/health/reports/overview', {
           params: { days: period, granularity: 'daily' },
         }),
         apiClient.get('/health/metrics/definitions'),
         apiClient.get('/health/metrics/intraday-types'),
+        apiClient.get('/users/me/timezone'),
       ]);
       if (reportRes.status === 'fulfilled') setReportData(reportRes.value.data);
       if (defsRes.status === 'fulfilled') setDefinitions(defsRes.value.data);
       if (intradayRes.status === 'fulfilled') setIntradayTypes(intradayRes.value.data || []);
+      if (tzRes.status === 'fulfilled') setTimeZone(tzRes.value.data?.timezone);
     } catch (error) {
       console.error('Failed to load dashboard data:', error);
     } finally {
@@ -823,7 +826,7 @@ export default function DashboardPage() {
       {/* Shares the dashboard's period filter: the chart spans the same
           trailing window as the report data, so there is no separate day
           picker. */}
-      {intradayTypes.length > 0 && <IntradayChart options={intradayTypes} days={period} />}
+      {intradayTypes.length > 0 && <IntradayChart options={intradayTypes} days={period} timeZone={timeZone} />}
 
       {/* Metric Categories */}
       {activeCategories.map((category) => {

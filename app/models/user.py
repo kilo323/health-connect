@@ -28,6 +28,9 @@ class User(Base):
     # Preferred measurement system ("metric" | "imperial"); None = per-metric only.
     # A per-metric user_unit_preferences row always overrides this.
     unit_system: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # IANA timezone for day bucketing; None = use the server timezone
+    # (see app/services/timezones.py).
+    timezone: Mapped[str | None] = mapped_column(String(60), nullable=True)
 
     # Relationships (use string annotations for forward references)
     health_metrics: Mapped[list["HealthMetric"]] = relationship("HealthMetric", back_populates="user", cascade="all, delete-orphan")

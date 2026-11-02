@@ -62,6 +62,14 @@ class FetchModelsRequest(BaseModel):
     api_key: str
 
 
+class RollupRepairRequest(BaseModel):
+    """Rebuild daily rows from Google's own rollups (services/rollup_repair.py)."""
+    days: int = 365
+    metrics: list[str] = ["steps", "distance", "move_minutes", "heart_minutes"]
+    delete_raw: bool = False
+    dry_run: bool = True
+
+
 @router.get("/settings/llm")
 async def get_llm_config(
     current_user: UserResponse = Depends(get_current_user),
@@ -575,6 +583,112 @@ async def run_compaction(
 
     summary = await compact_raw_metrics(dry_run=dry_run)
     return summary
+
+
+@router.get("/sync/rollup-repair")
+async def get_rollup_repair_info(
+    current_user: UserResponse = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Info for the rollup-repair tool: how far back history goes per user.
+
+    ``history_days`` is the lookback needed to cover ALL stored data, so the UI
+    can prefill the repair's days input without anyone querying the database.
+    """
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    from sqlalchemy import func as sa_func
+
+    from ..models.health_data import HealthMetric
+    from ..models.user import User
+    from ..services.rollup_repair import REPAIRABLE_METRICS
+
+    now = datetime.now(timezone.utc)
+    token_keys = (await db.execute(
+        select(AppSettings.key).where(AppSettings.key.like("google_health_tokens_%"))
+    )).scalars().all()
+    user_ids = sorted({int(k.rsplit("_", 1)[1]) for k in token_keys})
+
+    users = []
+    earliest_all = None
+    for uid in user_ids:
+        username = (await db.execute(
+            select(User.username).where(User.id == uid))).scalar_one_or_none()
+        earliest = (await db.execute(
+            select(sa_func.min(HealthMetric.recorded_at)).where(
+                HealthMetric.user_id == uid))).scalar_one_or_none()
+        if earliest is not None and earliest.tzinfo is None:
+            earliest = earliest.replace(tzinfo=timezone.utc)
+        if earliest is not None and (earliest_all is None or earliest < earliest_all):
+            earliest_all = earliest
+        users.append({
+            "id": uid,
+            "username": username or str(uid),
+            "earliest_date": earliest.date().isoformat() if earliest else None,
+            # +1 so the lookback day-count always reaches the oldest data point.
+            "history_days": (now - earliest).days + 1 if earliest else 0,
+        })
+
+    return {
+        "users": users,
+        "history_days": (now - earliest_all).days + 1 if earliest_all else 0,
+        "earliest_date": earliest_all.date().isoformat() if earliest_all else None,
+        "metrics": [
+            {"id": mid, "label": meta["label"], "interval": meta["interval"]}
+            for mid, meta in REPAIRABLE_METRICS.items()
+        ],
+        "default_metrics": [mid for mid, meta in REPAIRABLE_METRICS.items()
+                            if meta["interval"]],
+    }
+
+
+@router.post("/sync/rollup-repair")
+async def run_rollup_repair(
+    body: RollupRepairRequest,
+    current_user: UserResponse = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Rebuild authoritative daily rows from Google's dailyRollUp values (admin).
+
+    Writes Google's deduplicated totals as ``granularity='daily'`` rows for the
+    requested lookback; the read path prefers them over the locally summed raw
+    rows. ``dry_run`` (default) returns the per-day plan without writing.
+    ``delete_raw`` additionally removes the superseded raw rows of each rebuilt
+    local day (intraday charts then fall back to the hourly tier).
+    """
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    if not 1 <= body.days <= 3650:
+        raise HTTPException(status_code=400, detail="days must be between 1 and 3650")
+    if not body.metrics:
+        raise HTTPException(status_code=400, detail="select at least one metric")
+
+    from ..services.rollup_repair import REPAIRABLE_METRICS, rebuild_daily_rollups
+
+    unknown = [m for m in body.metrics if m not in REPAIRABLE_METRICS]
+    if unknown:
+        raise HTTPException(status_code=400,
+                            detail=f"unsupported metric(s): {', '.join(unknown)}")
+
+    token_keys = (await db.execute(
+        select(AppSettings.key).where(AppSettings.key.like("google_health_tokens_%"))
+    )).scalars().all()
+    user_ids = sorted({int(k.rsplit("_", 1)[1]) for k in token_keys})
+    if not user_ids:
+        raise HTTPException(status_code=400,
+                            detail="no user has authorized Google Health")
+
+    summaries = []
+    for uid in user_ids:
+        summaries.append(await rebuild_daily_rollups(
+            db, user_id=uid, data_types=body.metrics, days=body.days,
+            delete_raw=body.delete_raw, apply=not body.dry_run))
+    logger.info(
+        f"Rollup repair by admin '{current_user.username}': "
+        f"dry_run={body.dry_run} days={body.days} metrics={body.metrics} "
+        f"users={user_ids}")
+    return {"dry_run": body.dry_run, "summaries": summaries}
 
 
 @router.get("/llm/models")

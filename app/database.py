@@ -42,6 +42,13 @@ def _configure_sqlite(dbapi_connection, connection_record):
     finally:
         cursor.close()
 
+    # local_day(naive_utc_ts, tz_name) -> 'YYYY-MM-DD': buckets rows by the
+    # user's local calendar day in grouped SQL. Imported lazily — app.database
+    # is imported by the models, so a module-level import of anything that
+    # touches them would be circular.
+    from app.services.timezones import local_day as _local_day
+    dbapi_connection.create_function("local_day", 2, _local_day, deterministic=True)
+
 
 async_session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
@@ -369,5 +376,11 @@ async def init_db():
         # a user_unit_preferences row. See app/services/unit_systems.py.
         try:
             await conn.execute(text("ALTER TABLE users ADD COLUMN unit_system VARCHAR(20)"))
+        except Exception:
+            pass  # Column already exists
+        # IANA timezone used for day bucketing; NULL = server timezone
+        # (app/services/timezones.py).
+        try:
+            await conn.execute(text("ALTER TABLE users ADD COLUMN timezone VARCHAR(60)"))
         except Exception:
             pass  # Column already exists

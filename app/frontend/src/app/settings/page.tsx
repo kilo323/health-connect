@@ -6,6 +6,16 @@ import { Link as LinkIcon, Cloud, CheckCircle, Loader2, AlertCircle, RefreshCw }
 import FolderPicker from '@/components/FolderPicker';
 import apiClient from '@/lib/api-client';
 
+/** IANA zones for the day-boundary timezone picker. */
+const TIMEZONE_OPTIONS: string[] =
+  typeof Intl !== 'undefined' && typeof (Intl as any).supportedValuesOf === 'function'
+    ? (Intl as any).supportedValuesOf('timeZone')
+    : [
+        'UTC', 'America/New_York', 'America/Chicago', 'America/Denver',
+        'America/Los_Angeles', 'Europe/London', 'Europe/Berlin', 'Europe/Paris',
+        'Asia/Tokyo', 'Asia/Shanghai', 'Australia/Sydney',
+      ];
+
 export default function SettingsPage() {
   const [activeTab, setActiveTab] = useState<'google' | 'nextcloud' | 'sync'>('google');
 
@@ -31,6 +41,12 @@ export default function SettingsPage() {
   const [syncSettingsLoading, setSyncSettingsLoading] = useState(false);
   const [syncSettingsSaved, setSyncSettingsSaved] = useState(false);
 
+  // Timezone state (day bucketing; empty = server default)
+  const [timezone, setTimezone] = useState('');
+  const [serverTimezone, setServerTimezone] = useState('UTC');
+  const [timezoneLoading, setTimezoneLoading] = useState(false);
+  const [timezoneSaved, setTimezoneSaved] = useState(false);
+
   // Load current settings on mount; pick up the not-linked flag when
   // returning from the Google OAuth redirect.
   useEffect(() => {
@@ -44,11 +60,12 @@ export default function SettingsPage() {
 
   const loadSettings = async () => {
     try {
-      const [googleStatusRes, googleConfigRes, nextcloudRes, syncSettingsRes] = await Promise.all([
+      const [googleStatusRes, googleConfigRes, nextcloudRes, syncSettingsRes, timezoneRes] = await Promise.all([
         apiClient.get('/health/google-health/status').catch(() => ({ data: { is_linked: false } })),
         apiClient.get('/health/google-health/config').catch(() => ({ data: { client_id: '', is_configured: false } })),
         apiClient.get('/health/nextcloud/config').catch(() => ({ data: { server_url: '', username: '', is_configured: false } })),
         apiClient.get('/health/sync/settings').catch(() => ({ data: { sync_days_back: 7, last_google_sync: null } })),
+        apiClient.get('/users/me/timezone').catch(() => ({ data: { timezone: 'UTC', user_timezone: null, server_timezone: 'UTC' } })),
       ]);
 
       setGoogleConnected(googleStatusRes.data?.is_linked || false);
@@ -58,6 +75,8 @@ export default function SettingsPage() {
       setGoogleConfigured(googleConfigRes.data?.is_configured || false);
       setSyncDaysBack(syncSettingsRes.data?.sync_days_back ?? 7);
       setLastGoogleSync(syncSettingsRes.data?.last_google_sync ?? null);
+      setTimezone(timezoneRes.data?.user_timezone ?? '');
+      setServerTimezone(timezoneRes.data?.server_timezone ?? 'UTC');
 
       setNextcloudConnected(nextcloudRes.data?.is_configured || false);
       if (nextcloudRes.data?.server_url) setNextcloudUrl(nextcloudRes.data.server_url);
@@ -145,6 +164,21 @@ export default function SettingsPage() {
       console.error('Failed to save sync settings:', error);
     } finally {
       setSyncSettingsLoading(false);
+    }
+  };
+
+  const handleTimezoneSave = async () => {
+    setTimezoneLoading(true);
+    try {
+      await apiClient.put('/users/me/timezone', {
+        timezone: timezone === '' ? null : timezone,
+      });
+      setTimezoneSaved(true);
+      setTimeout(() => setTimezoneSaved(false), 3000);
+    } catch (error) {
+      console.error('Failed to save timezone:', error);
+    } finally {
+      setTimezoneLoading(false);
     }
   };
 
@@ -389,7 +423,7 @@ export default function SettingsPage() {
       )}
 
       {/* Sync Settings Tab */}
-      {activeTab === 'sync' && (
+      {activeTab === 'sync' && (<>
         <div className="card max-w-2xl">
           <h2 className="text-lg font-semibold text-gray-900 mb-1">Google Fit Sync Settings</h2>
           <p className="text-sm text-gray-500 mb-4">Configure how far back to sync health data from Google Fit.</p>
@@ -431,7 +465,42 @@ export default function SettingsPage() {
             </button>
           </div>
         </div>
-      )}
+
+        <div className="card max-w-2xl mt-6">
+          <h2 className="text-lg font-semibold text-gray-900 mb-1">Day Boundary Timezone</h2>
+          <p className="text-sm text-gray-500 mb-4">
+            Daily totals are grouped by calendar days in this timezone, matching what the
+            Google Health app reports. Defaults to the server timezone ({serverTimezone}).
+          </p>
+
+          <div className="space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Timezone
+              </label>
+              <select
+                value={timezone}
+                onChange={(e) => setTimezone(e.target.value)}
+                className="input-field w-full max-w-sm"
+              >
+                <option value="">Server default ({serverTimezone})</option>
+                {TIMEZONE_OPTIONS.map((tz) => (
+                  <option key={tz} value={tz}>{tz}</option>
+                ))}
+              </select>
+            </div>
+
+            <button
+              onClick={handleTimezoneSave}
+              disabled={timezoneLoading}
+              className="btn-primary flex items-center gap-2"
+            >
+              {timezoneLoading && <Loader2 className="h-4 w-4 animate-spin" />}
+              {timezoneSaved ? 'Saved!' : 'Save Timezone'}
+            </button>
+          </div>
+        </div>
+      </>)}
     </AuthLayout>
   );
 }

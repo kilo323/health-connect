@@ -15,11 +15,17 @@ from ..services.unit_systems import (
     parse_conversions,
     system_unit_for,
 )
+from ..services.timezones import (
+    is_valid_timezone,
+    resolve_timezone,
+    server_timezone_name,
+)
 from ..schemas.auth import (
     UserCreate, UserUpdate, UserResponse, LoginResponse,
     ProfileUpdate, PasswordChange, UnitPreferenceSet, UnitPreferenceResponse,
     UnitSystemSet, UnitsOverview, MetricUnitView,
     DashboardMetricsSet, DashboardMetricsResponse,
+    TimezoneInfo, TimezoneSet,
 )
 
 router = APIRouter(tags=["Users"])
@@ -330,6 +336,42 @@ async def set_unit_system(
     db.add(current_user)
     await db.commit()
     return {"message": "Measurement system updated", "unit_system": body.unit_system}
+
+
+# ── Timezone (day bucketing) ──────────────────────────────────────────────────
+
+
+@router.get("/me/timezone", response_model=TimezoneInfo)
+async def get_timezone(
+    current_user: User = Depends(get_current_active_user),
+):
+    """Effective timezone used to bucket metrics into calendar days."""
+    return TimezoneInfo(
+        timezone=resolve_timezone(current_user.timezone),
+        user_timezone=current_user.timezone,
+        server_timezone=server_timezone_name(),
+    )
+
+
+@router.put("/me/timezone")
+async def set_timezone(
+    body: TimezoneSet,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Set the timezone used for day boundaries. Null = server timezone."""
+    if body.timezone is not None and not is_valid_timezone(body.timezone):
+        raise HTTPException(
+            status_code=400,
+            detail="timezone must be a valid IANA name (e.g. America/New_York) or UTC",
+        )
+    current_user.timezone = body.timezone
+    db.add(current_user)
+    await db.commit()
+    return {
+        "message": "Timezone updated",
+        "timezone": resolve_timezone(current_user.timezone),
+    }
 
 
 # ── Dashboard metric selection ────────────────────────────────────────────────

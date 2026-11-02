@@ -33,6 +33,7 @@ class UserResponse(BaseModel):
     role: str
     is_active: bool
     created_at: datetime
+    timezone: str | None = None
 
     class Config:
         from_attributes = True
@@ -71,6 +72,18 @@ class UnitPreferenceResponse(BaseModel):
 class UnitSystemSet(BaseModel):
     """Global measurement system. Send null to fall back to per-metric units only."""
     unit_system: Literal["metric", "imperial"] | None = None
+
+
+class TimezoneInfo(BaseModel):
+    """Effective timezone for day bucketing and how it was resolved."""
+    timezone: str              # effective IANA name (user override or server default)
+    user_timezone: str | None  # explicit override, None = server default
+    server_timezone: str
+
+
+class TimezoneSet(BaseModel):
+    """Send null to fall back to the server timezone."""
+    timezone: str | None = None
 
 
 class MetricUnitView(BaseModel):
