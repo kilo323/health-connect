@@ -65,10 +65,19 @@ npm run build
 # Data setup (run BEFORE the first sync on a fresh database)
 .\.venv\Scripts\python.exe .\scripts\seed_metric_definitions.py
 
+# Backend deps (needed for scripts that import from app/, e.g. test_prune_and_hourly.py)
+.\.venv\Scripts\python.exe .\scripts\test_interval_dedup.py   # stdlib-only, needs no setup
+
 # Verification (the stand-in for a test suite; see scripts/test_*.py, scripts/verify_*.py)
-.\.venv\Scripts\python.exe .\scripts\test_prune_and_hourly.py
+.\.venv\Scripts\python.exe .\scripts\test_prune_and_hourly.py   # needs a DB in data/ (see below)
 .\.venv\Scripts\python.exe .\scripts\test_interval_dedup.py
 ```
+
+Run `pip install app/requirements.txt` into a `.venv` first (the `.\.venv\...` paths in
+the examples assume a Windows venv; on Linux/macOS use `python scripts/...` with the same
+venv's interpreter). The DB-backed verification scripts (`test_prune_and_hourly.py`, etc.)
+fail on a fresh checkout because `data/health_tracker.db` is not tracked — copy one in from
+a local environment before running them.
 
 `scripts/diagnose_steps.py` is a read-only diagnostic for step-count discrepancies
 (per-day totals, multi-device overlap, optional `--google` comparison against
